@@ -47,6 +47,7 @@ from electrum.util import (block_explorer_URL, profiler, TxMinedInfo,
                            OrderedDictWithIndex, timestamp_to_datetime,
                            Satoshis, Fiat, format_time)
 from electrum.logging import get_logger, Logger
+from electrum.simple_config import SimpleConfig
 
 from .custom_model import CustomNode, CustomModel
 from .util import (read_QIcon, MONOSPACE_FONT, Buttons, CancelButton, OkButton,
@@ -62,7 +63,6 @@ if TYPE_CHECKING:
 _logger = get_logger(__name__)
 
 
-# note: this list needs to be kept in sync with another in kivy
 TX_ICONS = [
     "unconfirmed.png",
     "warning.png",
@@ -155,7 +155,7 @@ class HistoryNode(CustomNode):
             return QVariant(d[col])
         if role == MyTreeView.ROLE_EDIT_KEY:
             return QVariant(get_item_key(tx_item))
-        if role not in (Qt.DisplayRole, Qt.EditRole):
+        if role not in (Qt.DisplayRole, Qt.EditRole, MyTreeView.ROLE_CLIPBOARD_DATA):
             if col == HistoryColumns.STATUS and role == Qt.DecorationRole:
                 icon = "lightning" if is_lightning else TX_ICONS[status]
                 return QVariant(read_QIcon(icon))
@@ -188,6 +188,13 @@ class HistoryNode(CustomNode):
                 blue_brush = QBrush(QColor("#1E1EFF"))
                 return QVariant(blue_brush)
             return QVariant()
+
+        add_thousands_sep = None
+        whitespaces = True
+        if role == MyTreeView.ROLE_CLIPBOARD_DATA:
+            add_thousands_sep = False
+            whitespaces = False
+
         if col == HistoryColumns.STATUS:
             return QVariant(status_str)
         elif col == HistoryColumns.DESCRIPTION and 'label' in tx_item:
@@ -196,23 +203,23 @@ class HistoryNode(CustomNode):
             bc_value = tx_item['bc_value'].value if 'bc_value' in tx_item else 0
             ln_value = tx_item['ln_value'].value if 'ln_value' in tx_item else 0
             value = bc_value + ln_value
-            v_str = window.format_amount(value, is_diff=True, whitespaces=True)
+            v_str = window.format_amount(value, is_diff=True, whitespaces=whitespaces, add_thousands_sep=add_thousands_sep)
             return QVariant(v_str)
         elif col == HistoryColumns.BALANCE:
-            balance = tx_item['balance'].value
-            balance_str = window.format_amount(balance, whitespaces=True)
+            balance = tx_item['balance'].value if 'balance' in tx_item else None
+            balance_str = window.format_amount(balance, whitespaces=whitespaces, add_thousands_sep=add_thousands_sep) if balance is not None else ''
             return QVariant(balance_str)
         elif col == HistoryColumns.FIAT_VALUE and 'fiat_value' in tx_item:
-            value_str = window.fx.format_fiat(tx_item['fiat_value'].value)
+            value_str = window.fx.format_fiat(tx_item['fiat_value'].value, add_thousands_sep=add_thousands_sep)
             return QVariant(value_str)
         elif col == HistoryColumns.FIAT_ACQ_PRICE and \
                 tx_item['value'].value < 0 and 'acquisition_price' in tx_item:
             # fixme: should use is_mine
             acq = tx_item['acquisition_price'].value
-            return QVariant(window.fx.format_fiat(acq))
+            return QVariant(window.fx.format_fiat(acq, add_thousands_sep=add_thousands_sep))
         elif col == HistoryColumns.FIAT_CAP_GAINS and 'capital_gain' in tx_item:
             cg = tx_item['capital_gain'].value
-            return QVariant(window.fx.format_fiat(cg))
+            return QVariant(window.fx.format_fiat(cg, add_thousands_sep=add_thousands_sep))
         elif col == HistoryColumns.TXID:
             return QVariant(tx_hash) if not is_lightning else QVariant('')
         elif col == HistoryColumns.SHORT_ID:
@@ -252,7 +259,7 @@ class HistoryModel(CustomModel, Logger):
         return True
 
     def should_show_fiat(self):
-        if not bool(self.window.config.get('history_rates', False)):
+        if not self.window.config.FX_HISTORY_RATES:
             return False
         fx = self.window.fx
         if not fx or not fx.is_enabled():
@@ -260,7 +267,7 @@ class HistoryModel(CustomModel, Logger):
         return fx.has_history()
 
     def should_show_capital_gains(self):
-        return self.should_show_fiat() and self.window.config.get('history_rates_capital_gains', False)
+        return self.should_show_fiat() and self.window.config.FX_HISTORY_RATES_CAPITAL_GAINS
 
     @profiler
     def refresh(self, reason: str):
@@ -294,43 +301,17 @@ class HistoryModel(CustomModel, Logger):
         parents = {}
         for tx_item in transactions.values():
             node = HistoryNode(self, tx_item)
-            group_id = tx_item.get('group_id')
-            if group_id is None:
-                self._root.addChild(node)
-            else:
-                parent = parents.get(group_id)
-                if parent is None:
-                    # create parent if it does not exist
-                    self._root.addChild(node)
-                    parents[group_id] = node
-                else:
-                    # if parent has no children, create two children
-                    if parent.childCount() == 0:
-                        child_data = dict(parent.get_data())
-                        node1 = HistoryNode(self, child_data)
-                        parent.addChild(node1)
-                        parent._data['label'] = child_data.get('group_label')
-                        parent._data['bc_value'] = child_data.get('bc_value', Satoshis(0))
-                        parent._data['ln_value'] = child_data.get('ln_value', Satoshis(0))
-                    # add child to parent
-                    parent.addChild(node)
-                    # update parent data
-                    parent._data['balance'] = tx_item['balance']
-                    parent._data['value'] += tx_item['value']
-                    if 'group_label' in tx_item:
-                        parent._data['label'] = tx_item['group_label']
-                    if 'bc_value' in tx_item:
-                        parent._data['bc_value'] += tx_item['bc_value']
-                    if 'ln_value' in tx_item:
-                        parent._data['ln_value'] += tx_item['ln_value']
-                    if 'fiat_value' in tx_item:
-                        parent._data['fiat_value'] += tx_item['fiat_value']
-                    if tx_item.get('txid') == group_id:
-                        parent._data['lightning'] = False
-                        parent._data['txid'] = tx_item['txid']
-                        parent._data['timestamp'] = tx_item['timestamp']
-                        parent._data['height'] = tx_item['height']
-                        parent._data['confirmations'] = tx_item['confirmations']
+            self._root.addChild(node)
+            for child_item in tx_item.get('children', []):
+                child_node = HistoryNode(self, child_item)
+                # add child to parent
+                node.addChild(child_node)
+
+        # compute balance once all children have been added
+        balance = 0
+        for node in self._root._children:
+            balance += node._data['value'].value
+            node._data['balance'] = Satoshis(balance)
 
         new_length = self._root.childCount()
         self.beginInsertRows(QModelIndex(), 0, new_length-1)
@@ -518,6 +499,8 @@ class HistoryList(MyTreeView, AcceptFileDragDrop):
         for col in HistoryColumns:
             sm = QHeaderView.Stretch if col == self.stretch_column else QHeaderView.ResizeToContents
             self.header().setSectionResizeMode(col, sm)
+        if self.config:
+            self.configvar_show_toolbar = self.config.cv.GUI_QT_HISTORY_TAB_SHOW_TOOLBAR
 
     def update(self):
         self.hm.refresh('HistoryList.update()')
@@ -546,13 +529,12 @@ class HistoryList(MyTreeView, AcceptFileDragDrop):
             self.end_button.setText(_('To') + ' ' + self.format_date(self.end_date))
         self.hide_rows()
 
-    CONFIG_KEY_SHOW_TOOLBAR = "show_toolbar_history"
-    def create_toolbar(self, config):
+    def create_toolbar(self, config: 'SimpleConfig'):
         toolbar, menu = self.create_toolbar_with_menu('')
         self.num_tx_label = toolbar.itemAt(0).widget()
         self._toolbar_checkbox = menu.addToggle(_("Filter by Date"), lambda: self.toggle_toolbar())
-        self.menu_fiat = menu.addConfig(_('Show Fiat Values'), 'history_rates', False, callback=self.main_window.app.update_fiat_signal.emit)
-        self.menu_capgains = menu.addConfig(_('Show Capital Gains'), 'history_rates_capital_gains', False, callback=self.main_window.app.update_fiat_signal.emit)
+        self.menu_fiat = menu.addConfig(config.cv.FX_HISTORY_RATES, short_desc=_('Show Fiat Values'), callback=self.main_window.app.update_fiat_signal.emit)
+        self.menu_capgains = menu.addConfig(config.cv.FX_HISTORY_RATES_CAPITAL_GAINS, callback=self.main_window.app.update_fiat_signal.emit)
         self.menu_summary = menu.addAction(_("&Summary"), self.show_summary)
         menu.addAction(_("&Plot"), self.plot_history_dialog)
         menu.addAction(_("&Export"), self.export_history_dialog)
@@ -731,10 +713,12 @@ class HistoryList(MyTreeView, AcceptFileDragDrop):
                 continue
             column_title = self.hm.headerData(column, Qt.Horizontal, Qt.DisplayRole)
             idx2 = idx.sibling(idx.row(), column)
-            column_data = (self.hm.data(idx2, Qt.DisplayRole).value() or '').strip()
+            clipboard_data = self.hm.data(idx2, self.ROLE_CLIPBOARD_DATA).value()
+            if clipboard_data is None:
+                clipboard_data = (self.hm.data(idx2, Qt.DisplayRole).value() or '').strip()
             cc.addAction(
                 column_title,
-                lambda text=column_data, title=column_title:
+                lambda text=clipboard_data, title=column_title:
                 self.place_text_on_clipboard(text, title=title))
         return cc
 

@@ -14,8 +14,9 @@
 # sudo apt-get install gcc-multilib g++-multilib
 # $ AUTOCONF_FLAGS="--host=i686-linux-gnu CFLAGS=-m32 CXXFLAGS=-m32 LDFLAGS=-m32" ./contrib/make_libsecp256k1.sh
 
-LIBSECP_VERSION="acf5c55ae6a94e5ca847e07def40427547876101"
-# ^ tag "v0.3.2"
+LIBSECP_VERSION="e3a885d42a7800c1ccebad94ad1e2b82c4df5c65"
+# ^ tag "v0.5.0"
+# note: this version is duplicated in contrib/android/p4a_recipes/libsecp256k1/__init__.py
 
 set -e
 
@@ -51,6 +52,8 @@ info "Building $pkgname..."
             $AUTOCONF_FLAGS \
             --prefix="$here/$pkgname/dist" \
             --enable-module-recovery \
+            --enable-module-extrakeys \
+            --enable-module-schnorrsig \
             --enable-experimental \
             --enable-module-ecdh \
             --disable-benchmark \

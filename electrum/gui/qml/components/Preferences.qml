@@ -1,7 +1,7 @@
-import QtQuick 2.6
-import QtQuick.Layouts 1.15
-import QtQuick.Controls 2.3
-import QtQuick.Controls.Material 2.0
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls
+import QtQuick.Controls.Material
 
 import org.electrum 1.0
 
@@ -79,7 +79,6 @@ Pane {
                     RowLayout {
                         Layout.columnSpan: 2
                         Layout.fillWidth: true
-                        Layout.leftMargin: -constants.paddingSmall
                         spacing: 0
                         Switch {
                             id: thousands
@@ -96,7 +95,6 @@ Pane {
                     }
 
                     RowLayout {
-                        Layout.leftMargin: -constants.paddingSmall
                         spacing: 0
                         Switch {
                             id: fiatEnable
@@ -125,7 +123,6 @@ Pane {
                     RowLayout {
                         Layout.columnSpan: 2
                         Layout.fillWidth: true
-                        Layout.leftMargin: -constants.paddingSmall
                         spacing: 0
                         Switch {
                             id: historicRates
@@ -162,7 +159,6 @@ Pane {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        Layout.leftMargin: -constants.paddingSmall
                         spacing: 0
                         Switch {
                             id: usePin
@@ -217,6 +213,24 @@ Pane {
                         }
                     }
 
+                    RowLayout {
+                        Layout.columnSpan: 2
+                        Layout.fillWidth: true
+                        spacing: 0
+                        Switch {
+                            id: syncLabels
+                            onCheckedChanged: {
+                                if (activeFocus)
+                                    AppController.setPluginEnabled('labels', checked)
+                            }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr('Synchronize labels')
+                            wrapMode: Text.Wrap
+                        }
+                    }
+
                     PrefsHeading {
                         Layout.columnSpan: 2
                         text: qsTr('Wallet behavior')
@@ -224,7 +238,6 @@ Pane {
 
                     RowLayout {
                         Layout.columnSpan: 2
-                        Layout.leftMargin: -constants.paddingSmall
                         spacing: 0
                         Switch {
                             id: spendUnconfirmed
@@ -245,10 +258,45 @@ Pane {
                         text: qsTr('Lightning')
                     }
 
+                    Label {
+                        Layout.fillWidth: true
+                        text: Config.shortDescFor('LIGHTNING_PAYMENT_FEE_MAX_MILLIONTHS')
+                        wrapMode: Text.Wrap
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr('<b>%1%</b> of payment').arg(maxfeeslider._fees[maxfeeslider.value]/10000)
+                        wrapMode: Text.Wrap
+                    }
+
+                    Slider {
+                        id: maxfeeslider
+                        Layout.columnSpan: 2
+                        Layout.fillWidth: true
+                        Layout.leftMargin: constants.paddingXLarge
+                        Layout.rightMargin: constants.paddingXLarge
+
+                        property var _fees: [500, 1000, 3000, 5000, 10000, 20000, 30000, 50000]
+
+                        snapMode: Slider.SnapOnRelease
+                        stepSize: 1
+                        from: 0
+                        to: _fees.length - 1
+
+                        onValueChanged: {
+                            if (activeFocus)
+                                Config.lightningPaymentFeeMaxMillionths = _fees[value]
+                        }
+
+                        Component.onCompleted: {
+                            value = _fees.indexOf(Config.lightningPaymentFeeMaxMillionths)
+                        }
+                    }
+
                     RowLayout {
                         Layout.columnSpan: 2
                         Layout.fillWidth: true
-                        Layout.leftMargin: -constants.paddingSmall
                         spacing: 0
                         Switch {
                             id: useTrampolineRouting
@@ -284,7 +332,6 @@ Pane {
                     RowLayout {
                         Layout.columnSpan: 2
                         Layout.fillWidth: true
-                        Layout.leftMargin: -constants.paddingSmall
                         spacing: 0
                         Switch {
                             id: useRecoverableChannels
@@ -319,7 +366,6 @@ Pane {
                     RowLayout {
                         Layout.columnSpan: 2
                         Layout.fillWidth: true
-                        Layout.leftMargin: -constants.paddingSmall
                         spacing: 0
                         Switch {
                             id: useFallbackAddress
@@ -343,7 +389,6 @@ Pane {
                     RowLayout {
                         Layout.columnSpan: 2
                         Layout.fillWidth: true
-                        Layout.leftMargin: -constants.paddingSmall
                         spacing: 0
                         Switch {
                             id: enableDebugLogs
@@ -356,6 +401,24 @@ Pane {
                         Label {
                             Layout.fillWidth: true
                             text: qsTr('Enable debug logs (for developers)')
+                            wrapMode: Text.Wrap
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.columnSpan: 2
+                        Layout.fillWidth: true
+                        spacing: 0
+                        Switch {
+                            id: alwaysAllowScreenshots
+                            onCheckedChanged: {
+                                if (activeFocus)
+                                    Config.alwaysAllowScreenshots = checked
+                            }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr('Always allow screenshots')
                             wrapMode: Text.Wrap
                         }
                     }
@@ -383,6 +446,8 @@ Pane {
         useTrampolineRouting.checked = !Config.useGossip
         useFallbackAddress.checked = Config.useFallbackAddress
         enableDebugLogs.checked = Config.enableDebugLogs
+        alwaysAllowScreenshots.checked = Config.alwaysAllowScreenshots
         useRecoverableChannels.checked = Config.useRecoverableChannels
+        syncLabels.checked = AppController.isPluginEnabled('labels')
     }
 }

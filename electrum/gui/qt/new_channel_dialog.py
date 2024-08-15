@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import QLabel, QVBoxLayout, QGridLayout, QPushButton, QComb
 
 from electrum.i18n import _
 from electrum.transaction import PartialTxOutput, PartialTransaction
-from electrum.lnutil import LN_MAX_FUNDING_SAT, MIN_FUNDING_SAT
+from electrum.lnutil import MIN_FUNDING_SAT
 from electrum.lnworker import hardcoded_trampoline_nodes
 from electrum import ecc
 from electrum.util import NotEnoughFunds, NoDynamicFeeEstimates
@@ -35,14 +35,13 @@ class NewChannelDialog(WindowModalDialog):
         self.min_amount_sat = min_amount_sat or MIN_FUNDING_SAT
         vbox = QVBoxLayout(self)
         toolbar, menu = create_toolbar_with_menu(self.config, '')
-        recov_tooltip = messages.to_rtf(messages.MSG_RECOVERABLE_CHANNELS)
         menu.addConfig(
-            _("Create recoverable channels"), 'use_recoverable_channels', True,
-            tooltip=recov_tooltip,
+            self.config.cv.LIGHTNING_USE_RECOVERABLE_CHANNELS,
+            checked=self.lnworker.has_recoverable_channels(),
         ).setEnabled(self.lnworker.can_have_recoverable_channels())
         vbox.addLayout(toolbar)
         msg = _('Choose a remote node and an amount to fund the channel.')
-        msg += '\n' + _('You need to put at least') + ': ' + self.window.format_amount_and_units(self.min_amount_sat)
+        msg += '\n' + _('Minimum required amount: {}').format(self.window.format_amount_and_units(self.min_amount_sat))
         vbox.addWidget(WWLabel(msg))
         if self.network.channel_db:
             vbox.addWidget(QLabel(_('Enter Remote Node ID or connection string or invoice')))
@@ -131,13 +130,13 @@ class NewChannelDialog(WindowModalDialog):
             self.window.show_error(str(e))
             return
         amount = tx.output_value()
-        amount = min(amount, LN_MAX_FUNDING_SAT)
+        amount = min(amount, self.config.LIGHTNING_MAX_FUNDING_SAT)
         self.amount_e.setAmount(amount)
 
     def run(self):
         if not self.exec_():
             return
-        if self.max_button.isChecked() and self.amount_e.get_amount() < LN_MAX_FUNDING_SAT:
+        if self.max_button.isChecked() and self.amount_e.get_amount() < self.config.LIGHTNING_MAX_FUNDING_SAT:
             # if 'max' enabled and amount is strictly less than max allowed,
             # that means we have fewer coins than max allowed, and hence we can
             # spend all coins

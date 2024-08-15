@@ -1,26 +1,10 @@
 from electrum.i18n import _
+from electrum.submarine_swaps import MIN_FINAL_CLTV_DELTA_FOR_CLIENT
 
-# note: kivy uses its own i18n methods in order to allow changing the language at runtime.
-#       These strings use electrum.i18n directly, to be GUI-agnostic, so the language for these
-#       cannot be changed at runtime.
 
 def to_rtf(msg):
     return '\n'.join(['<p>' + x + '</p>' for x in msg.split('\n\n')])
 
-
-MSG_RECOVERABLE_CHANNELS = _(
-"""Add extra data to your channel funding transactions, so that a static backup can be recovered from your seed.
-
-Note that static backups only allow you to request a force-close with the remote node. This assumes that the remote node is still online, did not lose its data, and accepts to force close the channel.
-
-If this is enabled, other nodes cannot open a channel to you. Channel recovery data is encrypted, so that only your wallet can decrypt it. However, blockchain analysis will be able to tell that the transaction was probably created by Electrum."""
-)
-
-MSG_CONFIG_INSTANT_SWAPS = _(
-"""If this option is checked, your client will complete reverse swaps before the funding transaction is confirmed.
-
-Note you are at risk of losing the funds in the swap, if the funding transaction never confirms."""
-)
 
 MSG_COOPERATIVE_CLOSE = _(
 """Your node will negotiate the transaction fee with the remote node. This method of closing the channel usually results in the lowest fees."""
@@ -46,12 +30,6 @@ MSG_LIGHTNING_SCB_WARNING = _(
 
 MSG_LIGHTNING_WARNING = MSG_LIGHTNING_EXPERIMENTAL_WARNING + "\n\n" + MSG_LIGHTNING_SCB_WARNING
 
-MSG_HELP_TRAMPOLINE = _(
-"""Lightning payments require finding a path through the Lightning Network. You may use trampoline routing, or local routing (gossip).
-
-Downloading the network gossip uses quite some bandwidth and storage, and is not recommended on mobile devices. If you use trampoline, you can only open channels with trampoline nodes."""
-)
-
 MGS_CONFLICTING_BACKUP_INSTANCE = _(
 """Another instance of this wallet (same seed) has an open channel with the same remote node. If you create this channel, you will not be able to use both wallets at the same time.
 
@@ -64,7 +42,28 @@ MSG_CAPITAL_GAINS = _(
 )
 
 MSG_NON_TRAMPOLINE_CHANNEL_FROZEN_WITHOUT_GOSSIP = _(
-"""Trampoline routing is enabled, but this channel is with a non-trampoline node.
-This channel may still be used for receiving, but it is frozen for sending.
+"""This channel is with a non-trampoline node; it cannot be used if trampoline is enabled.
 If you want to keep using this channel, you need to disable trampoline routing in your preferences."""
+)
+
+MSG_FREEZE_ADDRESS = _("When you freeze an address, the funds in that address will not be used for sending bitcoins.")
+MSG_FREEZE_COIN = _("When you freeze a coin, it will not be used for sending bitcoins.")
+
+MSG_FORWARD_SWAP_FUNDING_MEMPOOL = (
+    _('Your funding transaction has been broadcast.') + " " +
+    _('The swap will be finalized once your transaction is confirmed.') + " " +
+    _("After the funding transaction is mined, the server will reveal the preimage needed to "
+      "fulfill the pending received lightning HTLCs. The HTLCs expire in {} blocks. "
+      "You will need to be online after the funding transaction is confirmed but before the HTLCs expire, "
+      "to claim your money. If you go offline for several days while the swap is pending, "
+      "you risk losing the swap amount!").format(MIN_FINAL_CLTV_DELTA_FOR_CLIENT) + " " +
+    _("Please remain online until the funding transaction is confirmed.")
+)
+
+MSG_REVERSE_SWAP_FUNDING_MEMPOOL = (
+    _('The funding transaction has been detected.') + " " +
+    _('Your claiming transaction will be broadcast when the funding transaction is confirmed.') + " " +
+    _('You may choose to broadcast it earlier, although that would not be trustless.') + " " +
+    _("If you go offline before broadcasting the claiming transaction and let the swap time out, "
+      "you will not get back the already pre-paid mining fees.")
 )

@@ -1,6 +1,6 @@
-import QtQuick 2.6
-import QtQuick.Layouts 1.0
-import QtQuick.Controls 2.1
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls
 
 import org.electrum 1.0
 
@@ -15,7 +15,8 @@ ElDialog {
 
     padding: 0
 
-    title: wizardTitle + (pages.currentItem.title ? ' - ' + pages.currentItem.title : '')
+    title: (pages.currentItem.wizard_title ? pages.currentItem.wizard_title : wizardTitle) +
+        (pages.currentItem.title ? ' - ' + pages.currentItem.title : '')
     iconSource: '../../../icons/electrum.png'
 
     // android back button triggers close() on Popups. Disabling close here,
@@ -83,6 +84,14 @@ ElDialog {
                 console.log('END')
             }
         })
+        page.finish.connect(function() {
+            // run wizard.submit() a final time, so that the navmap[view]['accept'] handler can run (if any)
+            var newview = wiz.submit(page.wizard_data)
+            _setWizardData(newview.wizard_data)
+            console.log('wizard finished')
+            // finish wizard
+            wizard.doAccept()
+        })
         page.prev.connect(function() {
             var wdata = wiz.prev()
         })
@@ -133,7 +142,7 @@ ElDialog {
             function finish() {
                 currentItem.accept()
                 _setWizardData(pages.contentChildren[currentIndex].wizard_data)
-                wizard.doAccept()
+                currentItem.finish()
             }
 
             property bool pagevalid: false
@@ -199,16 +208,6 @@ ElDialog {
             }
 
         }
-    }
-
-    // make clicking the dialog background move the scope away from textedit fields
-    // so the keyboard goes away
-    // TODO: here it works on desktop, but not android. hmm.
-    MouseArea {
-        anchors.fill: parent
-        z: -1000
-        onClicked: { parkFocus.focus = true }
-        FocusScope { id: parkFocus }
     }
 
 }

@@ -12,10 +12,6 @@ WizardComponent {
 
     property bool otpVerified: false
 
-    function apply() {
-        wizard_data['trustedcoin_new_otp_secret'] = requestNewSecret.checked
-    }
-
     ColumnLayout {
         width: parent.width
 
@@ -40,7 +36,7 @@ WizardComponent {
 
         QRImage {
             Layout.alignment: Qt.AlignHCenter
-            visible: plugin.remoteKeyState == ''
+            visible: plugin.remoteKeyState == 'new' || plugin.remoteKeyState == 'reset'
             qrdata: encodeURI('otpauth://totp/Electrum 2FA ' + wizard_data['wallet_name']
                     + '?secret=' + plugin.otpSecret + '&digits=6')
             render: plugin.otpSecret
@@ -76,6 +72,7 @@ WizardComponent {
             Layout.alignment: Qt.AlignHCenter
             focus: true
             inputMethodHints: Qt.ImhSensitiveData | Qt.ImhDigitsOnly
+            validator: IntValidator {bottom: 0; top: 999999;}
             font.family: FixedFont
             font.pixelSize: constants.fontSizeLarge
             onTextChanged: {
@@ -117,7 +114,7 @@ WizardComponent {
 
     Component.onCompleted: {
         plugin = AppController.plugin('trustedcoin')
-        plugin.createKeystore(wizard_data['2fa_email'])
+        plugin.createKeystore()
         otp_auth.forceActiveFocus()
     }
 

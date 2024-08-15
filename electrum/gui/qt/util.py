@@ -1,44 +1,37 @@
-import asyncio
-import enum
+from abc import ABC, ABCMeta
 import os.path
 import time
 import sys
 import platform
 import queue
-import traceback
 import os
 import webbrowser
-from decimal import Decimal
 from functools import partial, lru_cache, wraps
-from typing import (NamedTuple, Callable, Optional, TYPE_CHECKING, Union, List, Dict, Any,
-                    Sequence, Iterable, Tuple, Type)
+from typing import (NamedTuple, Callable, Optional, TYPE_CHECKING, List, Any, Sequence, Tuple)
 
-from PyQt5 import QtWidgets, QtCore
-from PyQt5.QtGui import (QFont, QColor, QCursor, QPixmap, QStandardItem, QImage,
-                         QPalette, QIcon, QFontMetrics, QShowEvent, QPainter, QHelpEvent, QMouseEvent)
-from PyQt5.QtCore import (Qt, QPersistentModelIndex, QModelIndex, pyqtSignal,
-                          QCoreApplication, QItemSelectionModel, QThread,
-                          QSortFilterProxyModel, QSize, QLocale, QAbstractItemModel,
-                          QEvent, QRect, QPoint, QObject)
-from PyQt5.QtWidgets import (QPushButton, QLabel, QMessageBox, QHBoxLayout,
-                             QAbstractItemView, QVBoxLayout, QLineEdit,
+from PyQt5 import QtCore
+from PyQt5.QtGui import (QFont, QColor, QCursor, QPixmap, QImage,
+                         QPalette, QIcon, QFontMetrics, QPainter, QContextMenuEvent)
+from PyQt5.QtCore import (Qt, pyqtSignal, QCoreApplication, QThread, QSize, QRect, QPoint, QObject)
+from PyQt5.QtWidgets import (QPushButton, QLabel, QMessageBox, QHBoxLayout, QVBoxLayout, QLineEdit,
                              QStyle, QDialog, QGroupBox, QButtonGroup, QRadioButton,
-                             QFileDialog, QWidget, QToolButton, QTreeView, QPlainTextEdit,
-                             QHeaderView, QApplication, QToolTip, QTreeWidget, QStyledItemDelegate,
-                             QMenu, QStyleOptionViewItem, QLayout, QLayoutItem, QAbstractButton,
-                             QGraphicsEffect, QGraphicsScene, QGraphicsPixmapItem, QSizePolicy)
+                             QFileDialog, QWidget, QToolButton, QPlainTextEdit, QApplication, QToolTip,
+                             QGraphicsEffect, QGraphicsScene, QGraphicsPixmapItem, QLayoutItem, QLayout, QMenu,
+                             QFrame)
 
-from electrum.i18n import _, languages
-from electrum.util import FileImportFailed, FileExportFailed, make_aiohttp_session, resource_path
-from electrum.util import EventListener, event_listener
+from electrum.i18n import _
+from electrum.util import FileImportFailed, FileExportFailed, resource_path
+from electrum.util import EventListener, event_listener, get_logger
 from electrum.invoices import PR_UNPAID, PR_PAID, PR_EXPIRED, PR_INFLIGHT, PR_UNKNOWN, PR_FAILED, PR_ROUTING, PR_UNCONFIRMED, PR_BROADCASTING, PR_BROADCAST
 from electrum.logging import Logger
 from electrum.qrreader import MissingQrDetectionLib
 
 if TYPE_CHECKING:
     from .main_window import ElectrumWindow
-    from .installwizard import InstallWizard
+    from .paytoedit import PayToEdit
+
     from electrum.simple_config import SimpleConfig
+    from electrum.simple_config import ConfigVarWithConfig
 
 
 if platform.system() == 'Windows':
@@ -49,19 +42,21 @@ else:
     MONOSPACE_FONT = 'monospace'
 
 
+_logger = get_logger(__name__)
+
 dialogs = []
 
 pr_icons = {
-    PR_UNKNOWN:"warning.png",
-    PR_UNPAID:"unpaid.png",
-    PR_PAID:"confirmed.png",
-    PR_EXPIRED:"expired.png",
-    PR_INFLIGHT:"unconfirmed.png",
-    PR_FAILED:"warning.png",
-    PR_ROUTING:"unconfirmed.png",
-    PR_UNCONFIRMED:"unconfirmed.png",
-    PR_BROADCASTING:"unconfirmed.png",
-    PR_BROADCAST:"unconfirmed.png",
+    PR_UNKNOWN: "warning.png",
+    PR_UNPAID: "unpaid.png",
+    PR_PAID: "confirmed.png",
+    PR_EXPIRED: "expired.png",
+    PR_INFLIGHT: "unconfirmed.png",
+    PR_FAILED: "warning.png",
+    PR_ROUTING: "unconfirmed.png",
+    PR_UNCONFIRMED: "unconfirmed.png",
+    PR_BROADCASTING: "unconfirmed.png",
+    PR_BROADCAST: "unconfirmed.png",
 }
 
 
@@ -149,6 +144,10 @@ class HelpLabel(HelpMixin, QLabel):
         self.app = QCoreApplication.instance()
         self.font = self.font()
 
+    @classmethod
+    def from_configvar(cls, cv: 'ConfigVarWithConfig') -> 'HelpLabel':
+        return HelpLabel(cv.get_short_desc() + ':', cv.get_long_desc())
+
     def mouseReleaseEvent(self, x):
         self.show_help()
 
@@ -177,7 +176,7 @@ class HelpButton(HelpMixin, QToolButton):
 
 class InfoButton(HelpMixin, QPushButton):
     def __init__(self, text: str):
-        QPushButton.__init__(self, 'Info')
+        QPushButton.__init__(self, _('Info'))
         HelpMixin.__init__(self, text, help_title=_('Info'))
         self.setFocusPolicy(Qt.NoFocus)
         self.setFixedWidth(6 * char_width_in_lineedit())
@@ -193,16 +192,19 @@ class Buttons(QHBoxLayout):
                 continue
             self.addWidget(b)
 
+
 class CloseButton(QPushButton):
     def __init__(self, dialog):
         QPushButton.__init__(self, _("Close"))
         self.clicked.connect(dialog.close)
         self.setDefault(True)
 
+
 class CopyButton(QPushButton):
     def __init__(self, text_getter, app):
         QPushButton.__init__(self, _("Copy"))
         self.clicked.connect(lambda: app.clipboard().setText(text_getter()))
+
 
 class CopyCloseButton(QPushButton):
     def __init__(self, text_getter, app, dialog):
@@ -211,16 +213,19 @@ class CopyCloseButton(QPushButton):
         self.clicked.connect(dialog.close)
         self.setDefault(True)
 
+
 class OkButton(QPushButton):
     def __init__(self, dialog, label=None):
         QPushButton.__init__(self, label or _("OK"))
         self.clicked.connect(dialog.accept)
         self.setDefault(True)
 
+
 class CancelButton(QPushButton):
     def __init__(self, dialog, label=None):
         QPushButton.__init__(self, label or _("Cancel"))
         self.clicked.connect(dialog.reject)
+
 
 class MessageBoxMixin(object):
     def top_level_window_recurse(self, window=None, test_func=None):
@@ -317,7 +322,7 @@ class WindowModalDialog(QDialog, MessageBoxMixin):
 class WaitingDialog(WindowModalDialog):
     '''Shows a please wait dialog whilst running a task.  It is not
     necessary to maintain a reference to this dialog.'''
-    def __init__(self, parent: QWidget, message: str, task, on_success=None, on_error=None):
+    def __init__(self, parent: QWidget, message: str, task, on_success=None, on_error=None, on_cancel=None):
         assert parent
         if isinstance(parent, MessageBoxMixin):
             parent = parent.top_level_window()
@@ -325,6 +330,10 @@ class WaitingDialog(WindowModalDialog):
         self.message_label = QLabel(message)
         vbox = QVBoxLayout(self)
         vbox.addWidget(self.message_label)
+        if on_cancel:
+            self.cancel_button = CancelButton(self)
+            self.cancel_button.clicked.connect(on_cancel)
+            vbox.addLayout(Buttons(self.cancel_button))
         self.accepted.connect(self.on_accepted)
         self.show()
         self.thread = TaskThread(self)
@@ -384,6 +393,7 @@ def line_dialog(parent, title, label, ok_label, default=None):
     if dialog.exec_():
         return txt.text()
 
+
 def text_dialog(
         *,
         parent,
@@ -411,6 +421,7 @@ def text_dialog(
     if dialog.exec_():
         return txt.toPlainText()
 
+
 class ChoicesLayout(object):
     def __init__(self, msg, choices, on_clicked=None, checked_index=0):
         vbox = QVBoxLayout()
@@ -421,7 +432,7 @@ class ChoicesLayout(object):
         vbox.addWidget(gb2)
         vbox2 = QVBoxLayout()
         gb2.setLayout(vbox2)
-        self.group = group = QButtonGroup()
+        self.group = group = QButtonGroup(gb2)
         if isinstance(choices, list):
             iterator = enumerate(choices)
         else:
@@ -444,13 +455,134 @@ class ChoicesLayout(object):
     def selected_index(self):
         return self.group.checkedId()
 
-def address_field(addresses):
+
+class ChoiceWidget(QWidget):
+    itemSelected = pyqtSignal([int], arguments=['index'])
+
+    def __init__(self, *, message=None, choices=None, selected=None):
+        QWidget.__init__(self)
+        vbox = QVBoxLayout()
+        self.setLayout(vbox)
+
+        if choices is None:
+            choices = []
+
+        self.selected_index = -1
+        self.selected_item = None
+        self.selected_key = None
+
+        self.choices = choices
+
+        if message and len(message) > 50:
+            vbox.addWidget(WWLabel(message))
+            message = ""
+        gb2 = QGroupBox(message)
+        vbox.addWidget(gb2)
+        vbox2 = QVBoxLayout()
+        gb2.setLayout(vbox2)
+        self.group = group = QButtonGroup()
+        assert isinstance(choices, list)
+        iterator = enumerate(choices)
+        for i, c in iterator:
+            button = QRadioButton(gb2)
+            button.setText(c[1])
+            vbox2.addWidget(button)
+            group.addButton(button)
+            group.setId(button, i)
+            if (i == 0 and selected is None) or c[0] == selected:
+                self.selected_index = i
+                self.selected_item = c
+                self.selected_key = c[0]
+                button.setChecked(True)
+        group.buttonClicked.connect(self.on_selected)
+
+    def on_selected(self, button):
+        self.selected_index = self.group.id(button)
+        self.selected_item = self.choices[self.selected_index]
+        self.selected_key = self.choices[self.selected_index][0]
+        self.itemSelected.emit(self.selected_index)
+
+    def select(self, key):
+        iterator = enumerate(self.choices)
+        for i, c in iterator:
+            if key == c[0]:
+                self.group.button(i).click()
+
+
+class ResizableStackedWidget(QWidget):
+    """Simple alternative to QStackedWidget, as QStackedWidget always resizes to the largest
+       widget in the stack, leaving ugly scrollbars where they're not needed."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setLayout(QVBoxLayout())
+        self.widgets = []
+        self.current_index = -1
+
+    def sizeHint(self) -> QSize:
+        if not self.count() or not self.currentWidget():
+            return super().sizeHint()
+        return self.currentWidget().sizeHint()
+
+    def addWidget(self, widget: QWidget) -> int:
+        self.widgets.append(widget)
+        self.layout().addWidget(widget)
+        if len(self.widgets) == 1:  # first widget?
+            self.current_index = 0
+        self.showCurrentWidget()
+        return len(self.widgets) - 1
+
+    def removeWidget(self, widget: QWidget):
+        i = self.widgets.index(widget)
+        self.widgets.remove(widget)
+        self.layout().removeWidget(widget)
+        if self.current_index >= i:
+            self.current_index -= 1
+            if self.current_index == self.count() - 1:
+                self.showCurrentWidget()
+
+    def setCurrentIndex(self, index: int):
+        assert isinstance(index, int)
+        assert 0 <= index < len(self.widgets), f'invalid widget index {index}'
+        self.current_index = index
+        self.showCurrentWidget()
+
+    def currentWidget(self) -> Optional[QWidget]:
+        if self.current_index < 0:
+            return None
+        return self.widgets[self.current_index]
+
+    def showCurrentWidget(self):
+        if not self.widgets:
+            return
+
+        for i, k in enumerate(self.widgets):
+            if i == self.current_index:
+                k.show()
+            else:
+                k.hide()
+
+    def count(self) -> int:
+        return len(self.widgets)
+
+
+class VLine(QFrame):
+    """Vertical line separator"""
+    def __init__(self):
+        super(VLine, self).__init__()
+        self.setFrameShape(self.VLine | self.Sunken)
+        self.setLineWidth(1)
+
+
+def address_field(addresses, *, btn_text: str = None):
+    if btn_text is None:
+        btn_text = _('Get wallet address')
     hbox = QHBoxLayout()
     address_e = QLineEdit()
     if addresses and len(addresses) > 0:
         address_e.setText(addresses[0])
     else:
         addresses = []
+
     def func():
         try:
             i = addresses.index(str(address_e.text())) + 1
@@ -461,7 +593,7 @@ def address_field(addresses):
             # address not in the wallet (or to something that isn't an address)
             if addresses and len(addresses) > 0:
                 address_e.setText(addresses[0])
-    button = QPushButton(_('Address'))
+    button = QPushButton(btn_text)
     button.clicked.connect(func)
     hbox.addWidget(button)
     hbox.addWidget(address_e)
@@ -469,7 +601,6 @@ def address_field(addresses):
 
 
 def filename_field(parent, config, defaultname, select_msg):
-
     vbox = QVBoxLayout()
     vbox.addWidget(QLabel(_("Format")))
     gb = QGroupBox("format", parent)
@@ -483,7 +614,7 @@ def filename_field(parent, config, defaultname, select_msg):
 
     hbox = QHBoxLayout()
 
-    directory = config.get('io_dir', os.path.expanduser('~'))
+    directory = config.IO_DIRECTORY
     path = os.path.join(directory, defaultname)
     filename_e = QLineEdit()
     filename_e.setText(path)
@@ -518,9 +649,6 @@ def filename_field(parent, config, defaultname, select_msg):
     return vbox, filename_e, b1
 
 
-
-
-
 def get_iconname_qrcode() -> str:
     return "qrcode_white.png" if ColorScheme.dark_scheme else "qrcode.png"
 
@@ -529,7 +657,7 @@ def get_iconname_camera() -> str:
     return "camera_white.png" if ColorScheme.dark_scheme else "camera_dark.png"
 
 
-def editor_contextMenuEvent(self, p, e):
+def editor_contextMenuEvent(self, p: 'PayToEdit', e: 'QContextMenuEvent') -> None:
     m = self.createStandardContextMenu()
     m.addSeparator()
     m.addAction(read_QIcon(get_iconname_camera()),    _("Read QR code with camera"), p.on_qr_from_camera_input_btn)
@@ -539,7 +667,6 @@ def editor_contextMenuEvent(self, p, e):
 
 
 class GenericInputHandler:
-
     def input_qr_from_camera(
             self,
             *,
@@ -551,7 +678,7 @@ class GenericInputHandler:
     ) -> None:
         if setText is None:
             setText = self.setText
-        def cb(success: bool, error: str, data):
+        def cb(success: bool, error: str, data: Optional[str]):
             if not success:
                 if error:
                     show_error(error)
@@ -559,10 +686,13 @@ class GenericInputHandler:
             if not data:
                 data = ''
             if allow_multi:
-                new_text = self.text() + data + '\n'
+                new_text = self.text() + data + '\n'  # TODO: unused?
             else:
                 new_text = data
-            setText(new_text)
+                try:
+                    setText(new_text)
+                except Exception as e:
+                    show_error(_('Invalid payment identifier in QR') + ':\n' + repr(e))
 
         from .qrreader import scan_qrcode
         if parent is None:
@@ -579,10 +709,15 @@ class GenericInputHandler:
         if setText is None:
             setText = self.setText
         from .qrreader import scan_qr_from_image
+        screenshots = [screen.grabWindow(0).toImage()
+                       for screen in QApplication.instance().screens()]
+        if all(screen.allGray() for screen in screenshots):
+            show_error(_("Failed to take screenshot."))
+            return
         scanned_qr = None
-        for screen in QApplication.instance().screens():
+        for screenshot in screenshots:
             try:
-                scan_result = scan_qr_from_image(screen.grabWindow(0).toImage())
+                scan_result = scan_qr_from_image(screenshot)
             except MissingQrDetectionLib as e:
                 show_error(_("Unable to scan image.") + "\n" + repr(e))
                 return
@@ -596,10 +731,13 @@ class GenericInputHandler:
             return
         data = scanned_qr[0].data
         if allow_multi:
-            new_text = self.text() + data + '\n'
+            new_text = self.text() + data + '\n'  # TODO: unused?
         else:
             new_text = data
-        setText(new_text)
+            try:
+                setText(new_text)
+            except Exception as e:
+                show_error(_('Invalid payment identifier in QR') + ':\n' + repr(e))
 
     def input_file(
             self,
@@ -628,7 +766,10 @@ class GenericInputHandler:
         except BaseException as e:
             show_error(_('Error opening file') + ':\n' + repr(e))
         else:
-            setText(data)
+            try:
+                setText(data)
+            except Exception as e:
+                show_error(_('Invalid payment identifier in file') + ':\n' + repr(e))
 
     def input_paste_from_clipboard(
             self,
@@ -830,11 +971,11 @@ class OverlayControlMixin(GenericInputHandler):
         btn.setMenu(menu)
 
 
-
 class ButtonsLineEdit(OverlayControlMixin, QLineEdit):
     def __init__(self, text=None):
         QLineEdit.__init__(self, text)
         OverlayControlMixin.__init__(self, middle=True)
+
 
 class ShowQRLineEdit(ButtonsLineEdit):
     """ read-only line with qr and copy buttons """
@@ -844,6 +985,7 @@ class ShowQRLineEdit(ButtonsLineEdit):
         self.setFont(QFont(MONOSPACE_FONT))
         self.add_qr_show_button(config=config, title=title)
         self.addCopyButton()
+
 
 class ButtonsTextEdit(OverlayControlMixin, QPlainTextEdit):
     def __init__(self, text=None):
@@ -961,6 +1103,7 @@ class ColorScheme:
     YELLOW = ColorSchemeItem("#897b2a", "#ffff00")
     RED = ColorSchemeItem("#7c1111", "#f18c8c")
     BLUE = ColorSchemeItem("#123b7c", "#8cb3f2")
+    LIGHTBLUE = ColorSchemeItem("black", "#d0f0ff")
     DEFAULT = ColorSchemeItem("black", "white")
     GRAY = ColorSchemeItem("gray", "gray")
 
@@ -1048,10 +1191,10 @@ def export_meta_gui(electrum_window: 'ElectrumWindow', title, exporter):
 
 def getOpenFileName(*, parent, title, filter="", config: 'SimpleConfig') -> Optional[str]:
     """Custom wrapper for getOpenFileName that remembers the path selected by the user."""
-    directory = config.get('io_dir', os.path.expanduser('~'))
+    directory = config.IO_DIRECTORY
     fileName, __ = QFileDialog.getOpenFileName(parent, title, directory, filter)
     if fileName and directory != os.path.dirname(fileName):
-        config.set_key('io_dir', os.path.dirname(fileName), save=True)
+        config.IO_DIRECTORY = os.path.dirname(fileName)
     return fileName
 
 
@@ -1066,7 +1209,7 @@ def getSaveFileName(
         config: 'SimpleConfig',
 ) -> Optional[str]:
     """Custom wrapper for getSaveFileName that remembers the path selected by the user."""
-    directory = config.get('io_dir', os.path.expanduser('~'))
+    directory = config.IO_DIRECTORY
     path = os.path.join(directory, filename)
 
     file_dialog = QFileDialog(parent, title, path, filter)
@@ -1082,7 +1225,7 @@ def getSaveFileName(
 
     selected_path = file_dialog.selectedFiles()[0]
     if selected_path and directory != os.path.dirname(selected_path):
-        config.set_key('io_dir', os.path.dirname(selected_path), save=True)
+        config.IO_DIRECTORY = os.path.dirname(selected_path)
     return selected_path
 
 
@@ -1093,6 +1236,11 @@ def icon_path(icon_basename: str):
 @lru_cache(maxsize=1000)
 def read_QIcon(icon_basename: str) -> QIcon:
     return QIcon(icon_path(icon_basename))
+
+def read_QIcon_from_bytes(b: bytes) -> QIcon:
+    qp = QPixmap()
+    qp.loadFromData(b)
+    return QIcon(qp)
 
 class IconLabel(QWidget):
     HorizontalSpacing = 2
@@ -1124,8 +1272,10 @@ def char_width_in_lineedit() -> int:
     return max(9, char_width)
 
 
-def font_height() -> int:
-    return QFontMetrics(QLabel().font()).height()
+def font_height(widget: QWidget = None) -> int:
+    if widget is None:
+        widget = QLabel()
+    return QFontMetrics(widget.font()).height()
 
 
 def webopen(url: str):
@@ -1264,10 +1414,7 @@ class ImageGraphicsEffect(QObject):
         return result
 
 
-
-
 class QtEventListener(EventListener):
-
     qt_callback_signal = QtCore.pyqtSignal(tuple)
 
     def register_callbacks(self):
@@ -1275,20 +1422,31 @@ class QtEventListener(EventListener):
         EventListener.register_callbacks(self)
 
     def unregister_callbacks(self):
-        self.qt_callback_signal.disconnect()
+        try:
+            self.qt_callback_signal.disconnect()
+        except RuntimeError:  # wrapped Qt object might be deleted
+            pass
         EventListener.unregister_callbacks(self)
 
     def on_qt_callback_signal(self, args):
         func = args[0]
         return func(self, *args[1:])
 
+
 # decorator for members of the QtEventListener class
 def qt_event_listener(func):
     func = event_listener(func)
+
     @wraps(func)
     def decorator(self, *args):
         self.qt_callback_signal.emit( (func,) + args)
     return decorator
+
+
+class _ABCQObjectMeta(type(QObject), ABCMeta): pass
+class _ABCQWidgetMeta(type(QWidget), ABCMeta): pass
+class AbstractQObject(QObject, ABC, metaclass=_ABCQObjectMeta): pass
+class AbstractQWidget(QWidget, ABC, metaclass=_ABCQWidgetMeta): pass
 
 
 if __name__ == "__main__":

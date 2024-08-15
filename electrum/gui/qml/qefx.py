@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
-from PyQt5.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject, QRegularExpression
+from PyQt6.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject, QRegularExpression
 
 from electrum.bitcoin import COIN
 from electrum.exchange_rate import FxThread
@@ -10,6 +10,7 @@ from electrum.simple_config import SimpleConfig
 
 from .qetypes import QEAmount
 from .util import QtEventListener, event_listener
+
 
 class QEFX(QObject, QtEventListener):
     _logger = get_logger(__name__)
@@ -72,12 +73,14 @@ class QEFX(QObject, QtEventListener):
     historicRatesChanged = pyqtSignal()
     @pyqtProperty(bool, notify=historicRatesChanged)
     def historicRates(self):
-        return bool(self.fx.config.get('history_rates', True))
+        if not self.fx.config.cv.FX_HISTORY_RATES.is_set():
+            self.fx.config.FX_HISTORY_RATES = True  # override default
+        return self.fx.config.FX_HISTORY_RATES
 
     @historicRates.setter
     def historicRates(self, checked):
         if checked != self.historicRates:
-            self.fx.config.set_key('history_rates', bool(checked))
+            self.fx.config.FX_HISTORY_RATES = bool(checked)
             self.historicRatesChanged.emit()
             self.rateSourcesChanged.emit()
 
@@ -92,7 +95,7 @@ class QEFX(QObject, QtEventListener):
             self.fx.set_exchange(source)
             self.rateSourceChanged.emit()
 
-    enabledUpdated = pyqtSignal() # curiously, enabledChanged is clashing, so name it enabledUpdated
+    enabledUpdated = pyqtSignal()  # curiously, enabledChanged is clashing, so name it enabledUpdated
     @pyqtProperty(bool, notify=enabledUpdated)
     def enabled(self):
         return self.fx.is_enabled()
@@ -161,3 +164,15 @@ class QEFX(QObject, QtEventListener):
             return str(v.to_integral_value())
         else:
             return self.config.format_amount(v)
+
+    @pyqtSlot(str, result=bool)
+    def isRecent(self, timestamp):
+        # return True if unknown, e.g. timestamp not known yet, tx in mempool
+        try:
+            td = Decimal(timestamp)
+            if td == 0:
+                return True
+        except Exception:
+            return True
+        dt = datetime.fromtimestamp(int(td))
+        return dt + timedelta(days=1) > datetime.today()

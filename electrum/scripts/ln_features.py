@@ -11,7 +11,7 @@ import time
 
 from electrum.logging import get_logger, configure_logging
 from electrum.simple_config import SimpleConfig
-from electrum import constants
+from electrum import constants, util
 from electrum.daemon import Daemon
 from electrum.wallet import create_new_wallet
 from electrum.util import create_and_start_event_loop, log_exceptions, bfh
@@ -51,7 +51,7 @@ if not os.path.exists(wallet_path):
     create_new_wallet(path=wallet_path, config=config)
 
 # open wallet
-wallet = daemon.load_wallet(wallet_path, password=None, manual_upgrades=False)
+wallet = daemon.load_wallet(wallet_path, password=None, upgrade=True)
 wallet.start_network(network)
 
 
@@ -84,7 +84,7 @@ async def worker(work_queue: asyncio.Queue, results_queue: asyncio.Queue, flag):
         print(f"worker connecting to {connect_str}")
         try:
             peer = await wallet.lnworker.add_peer(connect_str)
-            res = await asyncio.wait_for(peer.initialized, TIMEOUT)
+            res = await util.wait_for2(peer.initialized, TIMEOUT)
             if res:
                 if peer.features & flag == work['features'] & flag:
                     await results_queue.put(True)
@@ -109,7 +109,7 @@ async def node_flag_stats(opt_flag: LnFeatures, presync: False):
     try:
         await wallet.lnworker.channel_db.data_loaded.wait()
 
-        # optionally presync graph (not relyable)
+        # optionally presync graph (not reliable)
         if presync:
             network.start_gossip()
 
@@ -126,7 +126,7 @@ async def node_flag_stats(opt_flag: LnFeatures, presync: False):
         with wallet.lnworker.channel_db.lock:
             nodes = wallet.lnworker.channel_db._nodes.copy()
 
-        # check how many nodes advertize opt/req flag in the gossip
+        # check how many nodes advertise opt/req flag in the gossip
         n_opt = 0
         n_req = 0
         print(f"analyzing {len(nodes.keys())} nodes")

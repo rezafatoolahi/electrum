@@ -1,7 +1,7 @@
-import QtQuick 2.6
-import QtQuick.Layouts 1.0
-import QtQuick.Controls 2.14
-import QtQuick.Controls.Material 2.0
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls
+import QtQuick.Controls.Material
 
 import org.electrum 1.0
 
@@ -36,6 +36,14 @@ ElDialog {
             Layout.rightMargin: constants.paddingLarge
             Layout.bottomMargin: constants.paddingLarge
 
+            InfoTextArea {
+                Layout.columnSpan: 2
+                Layout.fillWidth: true
+                compact: true
+                visible: invoiceParser.lnurlData['min_sendable_sat'] != invoiceParser.lnurlData['max_sendable_sat']
+                text: qsTr('Amount must be between %1 and %2 %3').arg(Config.formatSats(invoiceParser.lnurlData['min_sendable_sat'])).arg(Config.formatSats(invoiceParser.lnurlData['max_sendable_sat'])).arg(Config.baseUnit)
+            }
+
             Label {
                 text: qsTr('Provider')
                 color: Material.accentColor
@@ -64,7 +72,7 @@ ElDialog {
                 BtcField {
                     id: amountBtc
                     Layout.preferredWidth: rootLayout.width /3
-                    text: Config.formatSats(invoiceParser.lnurlData['min_sendable_sat'])
+                    text: Config.formatSatsForEditing(invoiceParser.lnurlData['min_sendable_sat'])
                     enabled: invoiceParser.lnurlData['min_sendable_sat'] != invoiceParser.lnurlData['max_sendable_sat']
                     color: Material.foreground // override gray-out on disabled
                     fiatfield: amountFiat
@@ -93,26 +101,17 @@ ElDialog {
                 }
             }
 
-            InfoTextArea {
-                Layout.columnSpan: 2
-                Layout.fillWidth: true
-                compact: true
-                visible: invoiceParser.lnurlData['min_sendable_sat'] != invoiceParser.lnurlData['max_sendable_sat']
-                text: qsTr('Amount must be between %1 and %2 %3').arg(Config.formatSats(invoiceParser.lnurlData['min_sendable_sat'])).arg(Config.formatSats(invoiceParser.lnurlData['max_sendable_sat'])).arg(Config.baseUnit)
-            }
-
             Label {
                 Layout.columnSpan: 2
                 visible: invoiceParser.lnurlData['comment_allowed'] > 0
                 text: qsTr('Message')
                 color: Material.accentColor
             }
-            TextArea {
+            ElTextArea {
                 id: comment
                 Layout.columnSpan: 2
                 Layout.fillWidth: true
-                Layout.leftMargin: constants.paddingLarge
-                Layout.minimumHeight: 80
+                Layout.minimumHeight: 160
                 visible: invoiceParser.lnurlData['comment_allowed'] > 0
                 wrapMode: TextEdit.Wrap
                 placeholderText: qsTr('Enter an (optional) message for the receiver')

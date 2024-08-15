@@ -68,8 +68,6 @@ ca_path = certifi.where()
 
 BUCKET_NAME_OF_ONION_SERVERS = 'onion'
 
-MAX_INCOMING_MSG_SIZE = 1_000_000  # in bytes
-
 _KNOWN_NETWORK_PROTOCOLS = {'t', 's'}
 PREFERRED_NETWORK_PROTOCOL = 's'
 assert PREFERRED_NETWORK_PROTOCOL in _KNOWN_NETWORK_PROTOCOLS
@@ -137,7 +135,6 @@ class NotificationSession(RPCSession):
         super(NotificationSession, self).__init__(*args, **kwargs)
         self.subscriptions = defaultdict(list)
         self.cache = {}
-        self.default_timeout = NetworkTimeout.Generic.NORMAL
         self._msg_counter = itertools.count(start=1)
         self.interface = interface
         self.cost_hard_limit = 0  # disable aiorpcx resource limits
@@ -168,12 +165,16 @@ class NotificationSession(RPCSession):
         try:
             # note: RPCSession.send_request raises TaskTimeout in case of a timeout.
             # TaskTimeout is a subclass of CancelledError, which is *suppressed* in TaskGroups
-            response = await asyncio.wait_for(
+            response = await util.wait_for2(
                 super().send_request(*args, **kwargs),
                 timeout)
         except (TaskTimeout, asyncio.TimeoutError) as e:
+            self.maybe_log(f"--> request timed out: {args} (id: {msg_id})")
             raise RequestTimedOut(f'request timed out: {args} (id: {msg_id})') from e
         except CodeMessageError as e:
+            self.maybe_log(f"--> {repr(e)} (id: {msg_id})")
+            raise
+        except BaseException as e:  # cancellations, etc. are useful for debugging
             self.maybe_log(f"--> {repr(e)} (id: {msg_id})")
             raise
         else:
@@ -181,7 +182,9 @@ class NotificationSession(RPCSession):
             return response
 
     def set_default_timeout(self, timeout):
+        assert hasattr(self, "sent_request_timeout")  # in base class
         self.sent_request_timeout = timeout
+        assert hasattr(self, "max_send_delay")        # in base class
         self.max_send_delay = timeout
 
     async def subscribe(self, method: str, params: List, queue: asyncio.Queue):
@@ -216,8 +219,8 @@ class NotificationSession(RPCSession):
 
     def default_framer(self):
         # overridden so that max_size can be customized
-        max_size = int(self.interface.network.config.get('network_max_incoming_msg_size',
-                                                         MAX_INCOMING_MSG_SIZE))
+        max_size = self.interface.network.config.NETWORK_MAX_INCOMING_MSG_SIZE
+        assert max_size > 500_000, f"{max_size=} (< 500_000) is too small"
         return NewlineFramer(max_size=max_size)
 
     async def close(self, *, force_after: int = None):
@@ -440,10 +443,14 @@ class Interface(Logger):
             await self.open_session(ca_ssl_context, exit_early=True)
         except ConnectError as e:
             cause = e.__cause__
-            if isinstance(cause, ssl.SSLError) and cause.reason == 'CERTIFICATE_VERIFY_FAILED':
-                # failures due to self-signed certs are normal
+            if (isinstance(cause, ssl.SSLCertVerificationError)
+                    and cause.reason == 'CERTIFICATE_VERIFY_FAILED'
+                    and cause.verify_code == 18):  # "self signed certificate"
+                # Good. We will use this server as self-signed.
                 return False
+            # Not good. Cannot use this server.
             raise
+        # Good. We will use this server as CA-signed.
         return True
 
     async def _try_saving_ssl_cert_for_first_time(self, ca_ssl_context):
@@ -604,7 +611,7 @@ class Interface(Logger):
 
     def _get_expected_fingerprint(self) -> Optional[str]:
         if self.is_main_server():
-            return self.network.config.get("serverfingerprint")
+            return self.network.config.NETWORK_SERVERFINGERPRINT
 
     def _verify_certificate_fingerprint(self, certificate):
         expected_fingerprint = self._get_expected_fingerprint()
@@ -692,10 +699,14 @@ class Interface(Logger):
                     await group.spawn(self.run_fetch_blocks)
                     await group.spawn(self.monitor_connection)
             except aiorpcx.jsonrpc.RPCError as e:
-                if e.code in (JSONRPC.EXCESSIVE_RESOURCE_USAGE,
-                              JSONRPC.SERVER_BUSY,
-                              JSONRPC.METHOD_NOT_FOUND):
-                    raise GracefulDisconnect(e, log_level=logging.WARNING) from e
+                if e.code in (
+                    JSONRPC.EXCESSIVE_RESOURCE_USAGE,
+                    JSONRPC.SERVER_BUSY,
+                    JSONRPC.METHOD_NOT_FOUND,
+                    JSONRPC.INTERNAL_ERROR,
+                ):
+                    log_level = logging.WARNING if self.is_main_server() else logging.INFO
+                    raise GracefulDisconnect(e, log_level=log_level) from e
                 raise
             finally:
                 self.got_disconnected.set()  # set this ASAP, ideally before any awaits
@@ -794,6 +805,7 @@ class Interface(Logger):
                         raise GracefulDisconnect('server chain conflicts with checkpoints or genesis')
                     last, height = await self.step(height)
                     continue
+                util.trigger_callback('blockchain_updated')
                 util.trigger_callback('network_updated')
                 height = (height // 2016 * 2016) + num_headers
                 assert height <= next_height+1, (height, self.tip)
@@ -1130,9 +1142,17 @@ class Interface(Logger):
             res = await self.session.send_request('blockchain.estimatefee', [num_blocks])
         except aiorpcx.jsonrpc.ProtocolError as e:
             # The protocol spec says the server itself should already have returned -1
-            # if it cannot provide an estimate, however apparently electrs does not conform
+            # if it cannot provide an estimate, however apparently "electrs" does not conform
             # and sends an error instead. Convert it here:
             if "cannot estimate fee" in e.message:
+                res = -1
+            else:
+                raise
+        except aiorpcx.jsonrpc.RPCError as e:
+            # The protocol spec says the server itself should already have returned -1
+            # if it cannot provide an estimate. "Fulcrum" often sends:
+            #   aiorpcx.jsonrpc.RPCError: (-32603, 'internal error: bitcoind request timed out')
+            if e.code == JSONRPC.INTERNAL_ERROR:
                 res = -1
             else:
                 raise

@@ -10,9 +10,8 @@ from PyQt5.QtWidgets import (QLineEdit, QStyle, QStyleOptionFrame, QSizePolicy)
 from .util import char_width_in_lineedit, ColorScheme
 
 from electrum.util import (format_satoshis_plain, decimal_point_to_base_unit_name,
-                           FEERATE_PRECISION, quantize_feerate, DECIMAL_POINT)
+                           FEERATE_PRECISION, quantize_feerate, DECIMAL_POINT, UI_UNIT_NAME_FEERATE_SAT_PER_VBYTE)
 from electrum.bitcoin import COIN, TOTAL_COIN_SUPPLY_LIMIT_IN_BTC
-
 
 _NOT_GIVEN = object()  # sentinel value
 
@@ -22,9 +21,11 @@ class FreezableLineEdit(QLineEdit):
 
     def setFrozen(self, b):
         self.setReadOnly(b)
-        self.setFrame(not b)
+        self.setStyleSheet(ColorScheme.LIGHTBLUE.as_stylesheet(True) if b else '')
         self.frozen.emit()
 
+    def isFrozen(self):
+        return self.isReadOnly()
 
 class SizedFreezableLineEdit(FreezableLineEdit):
 
@@ -153,6 +154,7 @@ class BTCAmountEdit(AmountEdit):
         else:
             text = self._get_text_from_amount(amount_sat)
             self.setText(text)
+        self.setFrozen(self.isFrozen()) # re-apply styling, as it is nuked by setText (?)
         self.repaint()  # macOS hack for #6269
 
 
@@ -163,7 +165,7 @@ class FeerateEdit(BTCAmountEdit):
         self.extra_precision = FEERATE_PRECISION
 
     def _base_unit(self):
-        return 'sat/byte'
+        return UI_UNIT_NAME_FEERATE_SAT_PER_VBYTE
 
     def _get_amount_from_text(self, text):
         sat_per_byte_amount = super()._get_amount_from_text(text)

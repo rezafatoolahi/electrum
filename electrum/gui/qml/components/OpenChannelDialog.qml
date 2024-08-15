@@ -1,7 +1,7 @@
-import QtQuick 2.6
-import QtQuick.Layouts 1.0
-import QtQuick.Controls 2.14
-import QtQuick.Controls.Material 2.0
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls
+import QtQuick.Controls.Material
 
 import org.electrum 1.0
 
@@ -45,16 +45,16 @@ ElDialog {
                     visible: !Daemon.currentWallet.lightningHasDeterministicNodeId
                     iconStyle: InfoTextArea.IconStyle.Warn
                     text: Daemon.currentWallet.seedType == 'segwit'
-                        ? [ qsTr('Your channels cannot be recovered from seed, because they were created with an old version of Electrum.'),
-                            qsTr('This means that you must save a backup of your wallet everytime you create a new channel.'),
+                        ? [ qsTr('Your channels cannot be recovered from seed, because they were created with an old version of Electrum.'), ' ',
+                            qsTr('This means that you must save a backup of your wallet every time you create a new channel.'),
                             '\n\n',
                             qsTr('If you want this wallet to have recoverable channels, you must close your existing channels and restore this wallet from seed.')
-                          ].join(' ')
-                        : [ qsTr('Your channels cannot be recovered from seed.'),
-                            qsTr('This means that you must save a backup of your wallet everytime you create a new channel.'),
+                          ].join('')
+                        : [ qsTr('Your channels cannot be recovered from seed.'), ' ',
+                            qsTr('This means that you must save a backup of your wallet every time you create a new channel.'),
                             '\n\n',
                             qsTr('If you want to have recoverable channels, you must create a new wallet with an Electrum seed')
-                          ].join(' ')
+                          ].join('')
                 }
 
                 InfoTextArea {
@@ -212,17 +212,24 @@ ElDialog {
     ChannelOpener {
         id: channelopener
         wallet: Daemon.currentWallet
-        onAuthRequired: {
+        onAuthRequired: (method, authMessage) => {
             app.handleAuthRequired(channelopener, method, authMessage)
         }
-        onValidationError: {
+        onValidationError: (code, message) => {
             if (code == 'invalid_nodeid') {
-                var dialog = app.messageDialog.createObject(app, { title: qsTr('Error'), 'text': message })
+                var dialog = app.messageDialog.createObject(app, {
+                    title: qsTr('Error'),
+                    iconSource: Qt.resolvedUrl('../../icons/warning.png'),
+                    text: message
+                })
                 dialog.open()
             }
         }
-        onConflictingBackup: {
-            var dialog = app.messageDialog.createObject(app, { 'text': message, 'yesno': true })
+        onConflictingBackup: (message) => {
+            var dialog = app.messageDialog.createObject(app, {
+                text: message,
+                yesno: true
+            })
             dialog.open()
             dialog.accepted.connect(function() {
                 channelopener.openChannel(true)
@@ -230,24 +237,24 @@ ElDialog {
         }
         onFinalizerChanged: {
             var dialog = confirmOpenChannelDialog.createObject(app, {
-                'satoshis': channelopener.amount
+                satoshis: channelopener.amount
             })
             dialog.accepted.connect(function() {
                 dialog.finalizer.signAndSend()
             })
             dialog.open()
         }
-        onChannelOpening: {
+        onChannelOpening: (peer) => {
             console.log('Channel is opening')
             app.channelOpenProgressDialog.reset()
             app.channelOpenProgressDialog.peer = peer
             app.channelOpenProgressDialog.open()
         }
-        onChannelOpenError: {
+        onChannelOpenError: (message) => {
             app.channelOpenProgressDialog.state = 'failed'
             app.channelOpenProgressDialog.error = message
         }
-        onChannelOpenSuccess: {
+        onChannelOpenSuccess: (cid, has_onchain_backup, min_depth, tx_complete) => {
             var message = qsTr('Channel established.') + ' '
                     + qsTr('This channel will be usable after %1 confirmations').arg(min_depth)
             if (!tx_complete) {

@@ -1,8 +1,218 @@
+# Release 4.5.5 (May 30, 2024)
+ * General:
+   - fix: timeout error shadowed by aiorpcx cancellation bug (#8954)
+   - changed: Fiat exchange rates: do not overwrite the locally saved historical
+     data. Instead, merge old and new data (a2fb70d6). This also ~fixes the
+     CoinGecko historical API by only asking for the last 365 days.
+   - update: support latest revision of SLIP-39 mnemonic spec (to restore) (#9059)
+ * Lightning:
+   - new: unify max fee bounds for payments, make it configurable (#9041)
+   - changed: trampoline fees: instead of hardcoded list, use
+     exponential search, capped by configurable budget (#9033)
+   - fix: opening new channels with peer that has .onion address (#9002)
+ * Dependencies:
+   - remove bitstring (#9020)
+ * QML GUI (Android):
+   - new: add tx options to ConfirmTxDialog, RbfBumpFeeDialog (#8909)
+   - various UI fixes (#9018, 472a65eb)
+ * Qt Desktop GUI:
+   - fix: save notes whenever modified (#8951)
+   - fix: offline 2fa wallet creation failing in some cases (#9037)
+   - various UI fixes (#8962, #8874, #9012, 1047200a, #9058)
+ * Hardware wallets:
+   - Bitbox02: fix: call pairing dialog when necessary (#8971)
+   - Jade: update: bump library to 1.0.29 (#9007)
+ * Binaries:
+   - new: add AppArmor profiles for tarball and AppImage (#9003)
+
+
+# Release 4.5.4 (March 14, 2024)
+ * General:
+    - fix: failing WalletDB upgrade(58) in 4.5.3 (#8913), for wallets with
+      partial txs saved into the history as local txs
+ * Lightning:
+   - changed: use longer final_cltv_delta for client-normal-swap, to
+     give more time for user to come back online while doing the swap (#8940)
+   - changed: create trampoline onions even when directly paying
+     a trampoline forwarder node (777c2ffb)
+ * Hardware wallets:
+   - Trezor:
+     - fix: allow adding SLIP-19 ownership proofs to complete inputs (#8910)
+ * Plugins:
+   - fix: a race in swapserver when handling server-normal-swaps (#8825)
+
+
+# Release 4.5.3 (February 23, 2024)
+ * General:
+   - changed: label tx sizes as "vbytes", and feerates as "sat/vbyte" (#8864)
+   - fix: wizard regression not able to use HWW as cosigner for new wallets (643fbec)
+   - fix: onchain invoice paid detection broken if jsonpatch enabled (#8842)
+   - fix: program not starting because of bad "proxy" config value (#8837)
+   - fix: wizard: don't log sensitive values: replace blacklist with whitelist (638fdf11)
+ * Qt Desktop GUI:
+   - new: basic "add server as bookmark" functionality (#8865)
+   - fix: potential race condition in wizard page construction (c78a90a)
+   - fix: don't use lightning invoice when user specifies MAX amount (#8900)
+   - various UI fixes (#8874, 2882c4b, #8889, 66af6e6)
+ * QML GUI (Android):
+   - fix potential concurrency issue loading wallet (#8355)
+   - fix: wizard: fails to restore from 2fa seed: KeyError: 'x1' (#8861)
+   - various UI fixes (50a53aa, 0a6b2d5, #8782, 6738e1e, c0b8927, 016e500, #8898)
+ * Hardware wallets:
+   - Trezor:
+     - new: support SLIP-19 ownership proofs, for trezor-based Standard_Wallets (#8871)
+     - fix: regression in sign_transaction for trezor one for multisig (#8813)
+ * CLI/RPC:
+   - changed: nicer error messages and error-passing (#8888)
+ * Lightning:
+   - fix: timing issue in lnpeer.reestablish_channel, for replaying unacked updates (79d88dcb)
+
+
+# Release 4.5.2 (January 20, 2024)
+ * Qt Desktop GUI:
+   - fix crash during startup/wizard-open (#8833)
+
+
+# Release 4.5.1 (January 19, 2024)
+ * Lightning:
+   - fix: MPP regression when using gossip that made paying small invoices fail (95c55c542)
+   - fix: better handle dataloss (#8814)
+     - allow manually requesting force-close in WE_ARE_TOXIC state
+     - fix some timing issues
+ * General:
+   - localization: never translate CLI/RPC (0e5a1380)
+   - localization: simplify how default language is chosen (0e5a1380)
+ * QML GUI (Android):
+   - bump min required android version from android 5.0 to 6.0 (#8761)
+     (older versions have not been working in practice since at least 4.4.0)
+   - properly refresh history if addresses are deleted from imported wallets (#8782)
+   - fix crash when LNURLp is scanned/pasted (#8822)
+   - fix crash for new wallets having cosigner using hww #8808)
+   - fix crash in finalizer when txid is undefined (#8807)
+   - various UI fixes (291f0ce, 3d9996a, ec81f00)
+ * Qt Desktop GUI:
+   - also support unfinished wallets when opened through File>Open (#8809)
+   - fix handler for OpenFileEventFilter (6a28ef5)
+
+
+# Release 4.5.0 (January 12, 2024)
+ * General:
+   - remove SSL options from config (012ce1c)
+   - make number of logfiles to keep configurable (5e8b14f)
+   - refactored SimpleConfig and added ConfigVars (#8454)
+   - incremental writes of wallet file (#8493)
+   - add warnings and prompt users when signing txs with non-default sighashes (#8687)
+   - refactored bip21/bolt11/lnurl/etc-handling into PaymentIdentifiers (#8462)
+   - add option to merge duplicate outputs (#8474)
+   - fix: consider bip21 URIs as invalid if they contain unknown req-* param (#8781)
+ * Lightning:
+   - fix BOLT-04 "MUST set `short_channel_id` to the `short_channel_id` used by the incoming onion" (ca93af2)
+   - add support for hold invoices (1acf426)
+   - add support for bundled payments (c4eb7d8)
+   - various MPP improvements (#7987, ..)
+   - support large channels (40f2087)
+   - new flow for normal submarine swaps (fd10ae3)
+     - the client now uses hold invoices, just like the server
+     - the client waits until HTLCs are received before going on-chain
+     - the user may cancel the swaps during that waiting time
+   - don't create invoice with duplicate route hints (a3997f8)
+   - don't set channel OPEN before channel_ready has been both sent and received (#8641)
+   - if trampoline is enabled, do not add non-trampoline nodes to invoices (120faa4)
+ * QML GUI (Android):
+   - port to Qt6 (#8545)
+   - fix regression for lnurl-pay (#8585)
+   - fix invoice amount bounds check (#8582)
+   - fix places where text was rendered off-screen for certain translations (#8611)
+   - fix lnworker undefined when node alias requested (#8635)
+   - fix BIP39 cosigner script type must be same as primary (8cd95f1)
+   - fix: never use current fiat exchange rate for old historical amounts (#8788)
+   - better handle android back-gesture (#8464)
+   - new: show private key in address details (016b5eb)
+   - new: show tx inputs in TxDetails and other dialogs (#8772)
+   - new: label sync plugin toggle (b6863b4)
+   - fix: properly suggest paying BOLT11 invoice onchain if insufficient balance (0a80460)
+   - new: message sign & verify (e5e1e46)
+   - new: allow never expiring payment requests (#8631)
+   - new: add coins/UTXOs to addresses list, add filters (cf91d2e)
+   - new: delete addresses from imported wallet (#8675)
+   - new: add support for lightning address and openalias (03dd38b)
+   - new: add setting to allow screenshots everywhere (0dae1733)
+   - simplify welcome page for first-start network settings (#8737)
+   - various UI fixes (b846eab, #8634, 9ed5f7b, 941f425, b20a4b9, af61b9d, 0fb47c8, 2995bc8, ..)
+ * Qt Desktop GUI:
+   - port wizard to new implementation
+   - fix fiat balance sorting in address list window (#8469, #8478)
+   - remove thousands separator when copying numbers to clipboard (#8479)
+   - new: option to use extra trampoline for legacy payments (b2053c6)
+   - new: send change to lightning option for on-chain payments (649ce97)
+   - new: notes tab for saving text in the (encrypted) wallet file (d691aa07)
+   - simplify welcome page for first-start network settings (#8737)
+   - various UI fixes (#8587, #6526, ..)
+ * Hardware wallets:
+   - Trezor: allow multiple change outputs (#3920)
+   - Trezor: support external pre-signed inputs (#8324)
+   - Bitbox02: update to 6.2.0 (#8459)
+ * Plugins:
+   - new: swapserver plugin (#8489)
+ * Builds/binaries:
+   - update bundled zbar, for security fixes (#8805)
+
+
+# Release 4.4.6 (August 18, 2023) (security update)
+ * Lightning:
+   - security fix: multiple lightning-related security issues have
+     been fixed. See disclosures:
+     - https://github.com/spesmilo/electrum/security/advisories/GHSA-9gpc-prj9-89x7
+     - https://github.com/spesmilo/electrum/security/advisories/GHSA-8r85-vp7r-hjxf
+   - fix: cannot sweep from channel after local-force-close, if using
+     imported channel backup (#8536). Fixing this required adding a
+     new field (local_payment_pubkey) to the channel backup
+     import/export format and bumping its version number
+     (v0->v1). Both v0 and v1 can be imported, and we only export v1
+     backups. When you force close a channel, the GUI will prompt you
+     to save a backup. In that case, you must export the backup using
+     the updated Electrum, and not rely on a backup made with an older
+     release of Electrum.  Note that if you request a force close from
+     the remote node or co-op close, you do not need to save a channel
+     backup.
+   - fix: we would sometimes attempt sending MPP even if not supported
+     by the invoice (2cf6173c)
+ * QML GUI:
+   - fix lnurl-pay when config.BTC_AMOUNTS_ADD_THOUSANDS_SEP is True
+     (5b4df759)
+ * Hardware wallets:
+   - Trezor: support longer than 9 character PIN codes (#8526)
+   - Jade: support more custom-built DIY Jade devices (#8546)
+ * Builds/binaries:
+   - include AppStream metainfo.xml in tarballs (#8501)
+ * fix: exceptions in some callbacks got lost and not logged (3e6580b9)
+
+
+# Release 4.4.5 (June 20, 2023)
+ * Hardware wallets:
+   - jade: fix regression in sign_transaction (#8463)
+ * Lightning:
+   - fix "rebalance_channels" function (#8468)
+ * enforce that we run with python asserts enabled,
+   regardless of platform (d1c88108)
+
+
+# Release 4.4.4 (May 31, 2023)
+ * QML GUI:
+   - fix creating multisig wallets involving BIP39 seeds (#8432)
+   - fix "cannot scroll to open a lightning channel" (#8446)
+   - wizard: "confirm seed" screen to normalize whitespaces (#8442)
+   - fix assert on address details screen (#8420)
+ * Qt GUI:
+   - better handle some expected errors in SwapDialog (#8430)
+ * libsecp256k1: bump bundled version to 0.3.2 (10574bb1)
+
+
 # Release 4.4.3 (May 11, 2023)
  * Intentionally break multisig wallets that have heterogeneous master
    keys. Versions 4.4.0 to 4.4.2 of Electrum for Android did not check
    that master keys used the same script type. This may have resulted
-   in the creation of multisig wallets that that cannot be spent from
+   in the creation of multisig wallets that cannot be spent from
    with any existing version of Electrum. It is not sure whether any
    users are affected by this; if there are any, we will publish
    instructions on how to spend those coins (#8417, #8418).
@@ -90,7 +300,7 @@
     - Coins tab: New menu that lets users easily spend a selection
       of UTXOs into a new channel, or into a submarine swap (Qt GUI).
  * Internal:
-    - Lightning invoices are regenerated everytime routing hints are
+    - Lightning invoices are regenerated every time routing hints are
       deprecated due to liquidity changes.
     - Script descriptors are used internally to sign transactions.
 
@@ -490,7 +700,7 @@ below are user-visible.
  * Android PIN reset: If the password is unified, the PIN can be reset
    by providing the password.
  * Android: on-chain fees have been removed from the settings
-   dialog. Instead, the fee slider is shown to the user everytime an
+   dialog. Instead, the fee slider is shown to the user every time an
    on-chain transaction will be performed (sending a payment, opening
    a channel, initiating a submarine swap)
  * BIP-0350: use bech32m for witness version 1+ addresses (4315fa43).

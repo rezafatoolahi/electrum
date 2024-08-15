@@ -110,8 +110,14 @@ class AddressSynchronizer(Logger, EventListener):
         self.remove_local_transactions_we_dont_have()
 
     def is_mine(self, address: Optional[str]) -> bool:
-        """Returns whether an address is in our set
-        Note: This class has a larget set of addresses than the wallet
+        """Returns whether an address is in our set.
+
+        Differences between adb.is_mine and wallet.is_mine:
+        - adb.is_mine: addrs that we are watching (e.g. via Synchronizer)
+            - lnwatcher adds its own lightning-related addresses that are not part of the wallet
+        - wallet.is_mine: addrs that are part of the wallet balance or the wallet might sign for
+            - an offline wallet might learn from a PSBT about addrs beyond its gap limit
+        Neither set is guaranteed to be a subset of the other.
         """
         if not address: return False
         return self.db.is_addr_in_history(address)
@@ -193,6 +199,7 @@ class AddressSynchronizer(Logger, EventListener):
     @event_listener
     def on_event_blockchain_updated(self, *args):
         self._get_balance_cache = {}  # invalidate cache
+        self.db.put('stored_height', self.get_local_height())
 
     async def stop(self):
         if self.network:
@@ -206,7 +213,6 @@ class AddressSynchronizer(Logger, EventListener):
                 self.synchronizer = None
                 self.verifier = None
                 self.unregister_callbacks()
-                self.db.put('stored_height', self.get_local_height())
 
     def add_address(self, address):
         if address not in self.db.history:
@@ -215,7 +221,7 @@ class AddressSynchronizer(Logger, EventListener):
             self.synchronizer.add(address)
         self.up_to_date_changed()
 
-    def get_conflicting_transactions(self, tx_hash, tx: Transaction, include_self=False):
+    def get_conflicting_transactions(self, tx: Transaction, *, include_self: bool = False) -> Set[str]:
         """Returns a set of transaction hashes from the wallet history that are
         directly conflicting with tx, i.e. they have common outpoints being
         spent with tx.
@@ -237,12 +243,13 @@ class AddressSynchronizer(Logger, EventListener):
                 # annoying assert that has revealed several bugs over time:
                 assert self.db.get_transaction(spending_tx_hash), "spending tx not in wallet db"
                 conflicting_txns |= {spending_tx_hash}
-            if tx_hash in conflicting_txns:
-                # this tx is already in history, so it conflicts with itself
-                if len(conflicting_txns) > 1:
-                    raise Exception('Found conflicting transactions already in wallet history.')
-                if not include_self:
-                    conflicting_txns -= {tx_hash}
+            if tx_hash := tx.txid():
+                if tx_hash in conflicting_txns:
+                    # this tx is already in history, so it conflicts with itself
+                    if len(conflicting_txns) > 1:
+                        raise Exception('Found conflicting transactions already in wallet history.')
+                    if not include_self:
+                        conflicting_txns -= {tx_hash}
             return conflicting_txns
 
     def get_transaction(self, txid: str) -> Optional[Transaction]:
@@ -292,7 +299,7 @@ class AddressSynchronizer(Logger, EventListener):
             # When this method exits, there must NOT be any conflict, so
             # either keep this txn and remove all conflicting (along with dependencies)
             #     or drop this txn
-            conflicting_txns = self.get_conflicting_transactions(tx_hash, tx)
+            conflicting_txns = self.get_conflicting_transactions(tx)
             if conflicting_txns:
                 existing_mempool_txn = any(
                     self.get_tx_height(tx_hash2).height in (TX_HEIGHT_UNCONFIRMED, TX_HEIGHT_UNCONF_PARENT)
@@ -334,7 +341,7 @@ class AddressSynchronizer(Logger, EventListener):
             for n, txo in enumerate(tx.outputs()):
                 v = txo.value
                 ser = tx_hash + ':%d'%n
-                scripthash = bitcoin.script_to_scripthash(txo.scriptpubkey.hex())
+                scripthash = bitcoin.script_to_scripthash(txo.scriptpubkey)
                 self.db.add_prevout_by_scripthash(scripthash, prevout=TxOutpoint.from_str(ser), value=v)
                 addr = txo.address
                 if addr and self.is_mine(addr):
@@ -400,7 +407,7 @@ class AddressSynchronizer(Logger, EventListener):
             self.unconfirmed_tx.pop(tx_hash, None)
             if tx:
                 for idx, txo in enumerate(tx.outputs()):
-                    scripthash = bitcoin.script_to_scripthash(txo.scriptpubkey.hex())
+                    scripthash = bitcoin.script_to_scripthash(txo.scriptpubkey)
                     prevout = TxOutpoint(bfh(tx_hash), idx)
                     self.db.remove_prevout_by_scripthash(scripthash, prevout=prevout, value=txo.value)
         util.trigger_callback('adb_removed_tx', self, tx_hash, tx)
@@ -415,8 +422,10 @@ class AddressSynchronizer(Logger, EventListener):
                 children |= self.get_depending_transactions(other_hash)
             return children
 
-    def receive_tx_callback(self, tx_hash: str, tx: Transaction, tx_height: int) -> None:
-        self.add_unverified_or_unconfirmed_tx(tx_hash, tx_height)
+    def receive_tx_callback(self, tx: Transaction, tx_height: int) -> None:
+        txid = tx.txid()
+        assert txid is not None
+        self.add_unverified_or_unconfirmed_tx(txid, tx_height)
         self.add_transaction(tx, allow_unrelated=True)
 
     def receive_history_callback(self, addr: str, hist, tx_fees: Dict[str, int]):
@@ -742,7 +751,15 @@ class AddressSynchronizer(Logger, EventListener):
         return delta
 
     def get_tx_fee(self, txid: str) -> Optional[int]:
-        """ Returns tx_fee or None. Use server fee only if tx is unconfirmed and not mine"""
+        """Returns tx_fee or None. Use server fee only if tx is unconfirmed and not mine.
+
+        Note: being fast is prioritised over completeness here. We try to avoid deserializing
+              the tx, as that is expensive if we are called for the whole history. We sometimes
+              incorrectly early-exit and return None, e.g. for not-all-ismine-input txs,
+              where we could calculate the fee if we deserialized (but to see if we have all
+              the parent txs available, we would have to deserialize first).
+              More expensive but more complete alternative: wallet.get_tx_info(tx).fee
+        """
         # check if stored fee is available
         fee = self.db.get_tx_fee(txid, trust_server=False)
         if fee is not None:
@@ -843,6 +860,7 @@ class AddressSynchronizer(Logger, EventListener):
                     excluded_coins: Set[str] = None) -> Tuple[int, int, int]:
         """Return the balance of a set of addresses:
         confirmed and matured, unconfirmed, unmatured
+        Note: intended for display-purposes. would need extreme care for "has enough funds" checks (see #8835)
         """
         if excluded_addresses is None:
             excluded_addresses = set()
@@ -959,7 +977,7 @@ class AddressSynchronizer(Logger, EventListener):
         """
         max_conf = -1
         h = self.db.get_addr_history(address)
-        needs_spv_check = not self.config.get("skipmerklecheck", False)
+        needs_spv_check = not self.config.NETWORK_SKIPMERKLECHECK
         for tx_hash, tx_height in h:
             if needs_spv_check:
                 tx_age = self.get_tx_height(tx_hash).conf

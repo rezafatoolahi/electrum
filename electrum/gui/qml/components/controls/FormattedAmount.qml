@@ -1,7 +1,7 @@
-import QtQuick 2.6
-import QtQuick.Controls 2.0
-import QtQuick.Layouts 1.0
-import QtQuick.Controls.Material 2.0
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import QtQuick.Controls.Material
 
 import org.electrum 1.0
 
@@ -47,8 +47,9 @@ GridLayout {
             if (historic && timestamp)
                 fiatLabel.text = '(' + Daemon.fx.fiatValueHistoric(amount, timestamp) + ' ' + Daemon.fx.fiatCurrency + ')'
             else
-                fiatLabel.text = '(' + Daemon.fx.fiatValue(amount) + ' ' + Daemon.fx.fiatCurrency + ')'
-
+                fiatLabel.text = Daemon.fx.isRecent(timestamp)
+                    ? '(' + Daemon.fx.fiatValue(amount) + ' ' + Daemon.fx.fiatCurrency + ')'
+                    : ''
     }
 
     onAmountChanged: setFiatValue()

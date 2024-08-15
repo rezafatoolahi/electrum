@@ -21,11 +21,13 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 import binascii
+import concurrent.futures
+import logging
 import os, sys, re, json
 from collections import defaultdict, OrderedDict
 from typing import (NamedTuple, Union, TYPE_CHECKING, Tuple, Optional, Callable, Any,
-                    Sequence, Dict, Generic, TypeVar, List, Iterable, Set)
-from datetime import datetime
+                    Sequence, Dict, Generic, TypeVar, List, Iterable, Set, Awaitable)
+from datetime import datetime, timezone
 import decimal
 from decimal import Decimal
 import traceback
@@ -49,6 +51,7 @@ import functools
 from functools import partial
 from abc import abstractmethod, ABC
 import socket
+import enum
 
 import attr
 import aiohttp
@@ -203,6 +206,14 @@ class UserFacingException(Exception):
 class InvoiceError(UserFacingException): pass
 
 
+class NetworkOfflineException(UserFacingException):
+    """Can be raised if we are running in offline mode (--offline flag)
+    and the user requests an operation that requires the network.
+    """
+    def __str__(self):
+        return _("You are offline.")
+
+
 # Throw this exception to unwind the stack like when an error occurs.
 # However unlike other exceptions the user won't be informed.
 class UserCancelled(Exception):
@@ -228,6 +239,7 @@ class Satoshis(object):
     def __new__(cls, value):
         self = super(Satoshis, cls).__new__(cls)
         # note: 'value' sometimes has msat precision
+        assert isinstance(value, (int, Decimal)), f"unexpected type for {value=!r}"
         self.value = value
         return self
 
@@ -297,9 +309,6 @@ class MyEncoder(json.JSONEncoder):
     def default(self, obj):
         # note: this does not get called for namedtuples :(  https://bugs.python.org/issue30343
         from .transaction import Transaction, TxOutput
-        from .lnutil import UpdateAddHtlc
-        if isinstance(obj, UpdateAddHtlc):
-            return obj.to_tuple()
         if isinstance(obj, Transaction):
             return obj.serialize()
         if isinstance(obj, TxOutput):
@@ -372,7 +381,9 @@ class DaemonThread(threading.Thread, Logger):
         self.running_lock = threading.Lock()
         self.job_lock = threading.Lock()
         self.jobs = []
-        self.stopped_event = threading.Event()  # set when fully stopped
+        self.stopped_event = threading.Event()        # set when fully stopped
+        self.stopped_event_async = asyncio.Event()    # set when fully stopped
+        self.wake_up_event = threading.Event()  # for perf optimisation of polling in run()
 
     def add_jobs(self, jobs):
         with self.job_lock:
@@ -406,6 +417,8 @@ class DaemonThread(threading.Thread, Logger):
     def stop(self):
         with self.running_lock:
             self.running = False
+            self.wake_up_event.set()
+            self.wake_up_event.clear()
 
     def on_stop(self):
         if 'ANDROID_DATA' in os.environ:
@@ -414,6 +427,8 @@ class DaemonThread(threading.Thread, Logger):
             self.logger.info("jnius detach")
         self.logger.info("stopped")
         self.stopped_event.set()
+        loop = get_asyncio_loop()
+        loop.call_soon_threadsafe(self.stopped_event_async.set)
 
 
 def print_stderr(*args):
@@ -474,6 +489,35 @@ def profiler(func=None, *, min_threshold: Union[int, float, None] = None):
     return do_profile
 
 
+class AsyncHangDetector:
+    """Context manager that logs every `n` seconds if encapsulated context still has not exited."""
+
+    def __init__(
+        self,
+        *,
+        period_sec: int = 15,
+        message: str,
+        logger: logging.Logger = None,
+    ):
+        self.period_sec = period_sec
+        self.message = message
+        self.logger = logger or _logger
+
+    async def _monitor(self):
+        # note: this assumes that the event loop itself is not blocked
+        t0 = time.monotonic()
+        while True:
+            await asyncio.sleep(self.period_sec)
+            t1 = time.monotonic()
+            self.logger.info(f"{self.message} (after {t1 - t0:.2f} sec)")
+
+    async def __aenter__(self):
+        self.mtask = asyncio.create_task(self._monitor())
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.mtask.cancel()
+
+
 def android_ext_dir():
     from android.storage import primary_external_storage_path
     return primary_external_storage_path()
@@ -525,12 +569,13 @@ def assert_file_in_datadir_available(path, config_path):
 
 
 def standardize_path(path):
+    # note: os.path.realpath() is not used, as on Windows it can return non-working paths (see #8495).
+    #       This means that we don't resolve symlinks!
     return os.path.normcase(
-            os.path.realpath(
                 os.path.abspath(
                     os.path.expanduser(
                         path
-    ))))
+    )))
 
 
 def get_new_wallet_name(wallet_folder: str) -> str:
@@ -779,6 +824,10 @@ def format_satoshis(
 
 FEERATE_PRECISION = 1  # num fractional decimal places for sat/byte fee rates
 _feerate_quanta = Decimal(10) ** (-FEERATE_PRECISION)
+UI_UNIT_NAME_FEERATE_SAT_PER_VBYTE = "sat/vbyte"
+UI_UNIT_NAME_FEERATE_SAT_PER_VB = "sat/vB"
+UI_UNIT_NAME_TXSIZE_VBYTES = "vbytes"
+UI_UNIT_NAME_MEMPOOL_MB = "vMB"
 
 
 def format_fee_satoshis(fee, *, num_zeros=0, precision=None):
@@ -795,10 +844,13 @@ def quantize_feerate(fee) -> Union[None, Decimal, int]:
     return Decimal(fee).quantize(_feerate_quanta, rounding=decimal.ROUND_HALF_DOWN)
 
 
-def timestamp_to_datetime(timestamp: Union[int, float, None]) -> Optional[datetime]:
+def timestamp_to_datetime(timestamp: Union[int, float, None], *, utc: bool = False) -> Optional[datetime]:
     if timestamp is None:
         return None
-    return datetime.fromtimestamp(timestamp)
+    tz = None
+    if utc:
+        tz = timezone.utc
+    return datetime.fromtimestamp(timestamp, tz=tz)
 
 
 def format_time(timestamp: Union[int, float, None]) -> str:
@@ -886,13 +938,9 @@ def age(
 mainnet_block_explorers = {
     '3xpl.com': ('https://3xpl.com/bitcoin/',
                         {'tx': 'transaction/', 'addr': 'address/'}),
-    'Bitupper Explorer': ('https://bitupper.com/en/explorer/bitcoin/',
-                        {'tx': 'transactions/', 'addr': 'addresses/'}),
     'Bitflyer.jp': ('https://chainflyer.bitflyer.jp/',
                         {'tx': 'Transaction/', 'addr': 'Address/'}),
     'Blockchain.info': ('https://blockchain.com/btc/',
-                        {'tx': 'tx/', 'addr': 'address/'}),
-    'blockchainbdgpzk.onion': ('https://blockchainbdgpzk.onion/',
                         {'tx': 'tx/', 'addr': 'address/'}),
     'Blockstream.info': ('https://blockstream.info/',
                         {'tx': 'tx/', 'addr': 'address/'}),
@@ -903,8 +951,6 @@ mainnet_block_explorers = {
     'Chain.so': ('https://www.chain.so/',
                         {'tx': 'tx/BTC/', 'addr': 'address/BTC/'}),
     'Insight.is': ('https://insight.bitpay.com/',
-                        {'tx': 'tx/', 'addr': 'address/'}),
-    'TradeBlock.com': ('https://tradeblock.com/blockchain/',
                         {'tx': 'tx/', 'addr': 'address/'}),
     'BlockCypher.com': ('https://live.blockcypher.com/btc/',
                         {'tx': 'tx/', 'addr': 'address/'}),
@@ -918,8 +964,6 @@ mainnet_block_explorers = {
                         {'tx': 'tx/', 'addr': 'address/'}),
     'OXT.me': ('https://oxt.me/',
                         {'tx': 'transaction/', 'addr': 'address/'}),
-    'smartbit.com.au': ('https://www.smartbit.com.au/',
-                        {'tx': 'tx/', 'addr': 'address/'}),
     'mynode.local': ('http://mynode.local:3002/',
                         {'tx': 'tx/', 'addr': 'address/'}),
     'system default': ('blockchain:/',
@@ -974,25 +1018,24 @@ def block_explorer(config: 'SimpleConfig') -> Optional[str]:
     """Returns name of selected block explorer,
     or None if a custom one (not among hardcoded ones) is configured.
     """
-    if config.get('block_explorer_custom') is not None:
+    if config.BLOCK_EXPLORER_CUSTOM is not None:
         return None
-    default_ = 'Blockstream.info'
-    be_key = config.get('block_explorer', default_)
+    be_key = config.BLOCK_EXPLORER
     be_tuple = block_explorer_info().get(be_key)
     if be_tuple is None:
-        be_key = default_
+        be_key = config.cv.BLOCK_EXPLORER.get_default_value()
     assert isinstance(be_key, str), f"{be_key!r} should be str"
     return be_key
 
 
 def block_explorer_tuple(config: 'SimpleConfig') -> Optional[Tuple[str, dict]]:
-    custom_be = config.get('block_explorer_custom')
+    custom_be = config.BLOCK_EXPLORER_CUSTOM
     if custom_be:
         if isinstance(custom_be, str):
             return custom_be, _block_explorer_default_api_loc
         if isinstance(custom_be, (tuple, list)) and len(custom_be) == 2:
             return tuple(custom_be)
-        _logger.warning(f"not using 'block_explorer_custom' from config. "
+        _logger.warning(f"not using {config.cv.BLOCK_EXPLORER_CUSTOM.key()!r} from config. "
                         f"expected a str or a pair but got {custom_be!r}")
         return None
     else:
@@ -1013,177 +1056,8 @@ def block_explorer_URL(config: 'SimpleConfig', kind: str, item: str) -> Optional
     url_parts = [explorer_url, kind_str, item]
     return ''.join(url_parts)
 
-# URL decode
-#_ud = re.compile('%([0-9a-hA-H]{2})', re.MULTILINE)
-#urldecode = lambda x: _ud.sub(lambda m: chr(int(m.group(1), 16)), x)
 
 
-# note: when checking against these, use .lower() to support case-insensitivity
-BITCOIN_BIP21_URI_SCHEME = 'bitcoin'
-LIGHTNING_URI_SCHEME = 'lightning'
-
-
-class InvalidBitcoinURI(Exception): pass
-
-
-# TODO rename to parse_bip21_uri or similar
-def parse_URI(
-    uri: str,
-    on_pr: Callable[['PaymentRequest'], None] = None,
-    *,
-    loop: asyncio.AbstractEventLoop = None,
-) -> dict:
-    """Raises InvalidBitcoinURI on malformed URI."""
-    from . import bitcoin
-    from .bitcoin import COIN, TOTAL_COIN_SUPPLY_LIMIT_IN_BTC
-    from .lnaddr import lndecode, LnDecodeException
-
-    if not isinstance(uri, str):
-        raise InvalidBitcoinURI(f"expected string, not {repr(uri)}")
-
-    if ':' not in uri:
-        if not bitcoin.is_address(uri):
-            raise InvalidBitcoinURI("Not a bitcoin address")
-        return {'address': uri}
-
-    u = urllib.parse.urlparse(uri)
-    if u.scheme.lower() != BITCOIN_BIP21_URI_SCHEME:
-        raise InvalidBitcoinURI("Not a bitcoin URI")
-    address = u.path
-
-    # python for android fails to parse query
-    if address.find('?') > 0:
-        address, query = u.path.split('?')
-        pq = urllib.parse.parse_qs(query)
-    else:
-        pq = urllib.parse.parse_qs(u.query)
-
-    for k, v in pq.items():
-        if len(v) != 1:
-            raise InvalidBitcoinURI(f'Duplicate Key: {repr(k)}')
-
-    out = {k: v[0] for k, v in pq.items()}
-    if address:
-        if not bitcoin.is_address(address):
-            raise InvalidBitcoinURI(f"Invalid bitcoin address: {address}")
-        out['address'] = address
-    if 'amount' in out:
-        am = out['amount']
-        try:
-            m = re.match(r'([0-9.]+)X([0-9])', am)
-            if m:
-                k = int(m.group(2)) - 8
-                amount = Decimal(m.group(1)) * pow(Decimal(10), k)
-            else:
-                amount = Decimal(am) * COIN
-            if amount > TOTAL_COIN_SUPPLY_LIMIT_IN_BTC * COIN:
-                raise InvalidBitcoinURI(f"amount is out-of-bounds: {amount!r} BTC")
-            out['amount'] = int(amount)
-        except Exception as e:
-            raise InvalidBitcoinURI(f"failed to parse 'amount' field: {repr(e)}") from e
-    if 'message' in out:
-        out['message'] = out['message']
-        out['memo'] = out['message']
-    if 'time' in out:
-        try:
-            out['time'] = int(out['time'])
-        except Exception as e:
-            raise InvalidBitcoinURI(f"failed to parse 'time' field: {repr(e)}") from e
-    if 'exp' in out:
-        try:
-            out['exp'] = int(out['exp'])
-        except Exception as e:
-            raise InvalidBitcoinURI(f"failed to parse 'exp' field: {repr(e)}") from e
-    if 'sig' in out:
-        try:
-            out['sig'] = bitcoin.base_decode(out['sig'], base=58).hex()
-        except Exception as e:
-            raise InvalidBitcoinURI(f"failed to parse 'sig' field: {repr(e)}") from e
-    if 'lightning' in out:
-        try:
-            lnaddr = lndecode(out['lightning'])
-        except LnDecodeException as e:
-            raise InvalidBitcoinURI(f"Failed to decode 'lightning' field: {e!r}") from e
-        amount_sat = out.get('amount')
-        if amount_sat:
-            # allow small leeway due to msat precision
-            if abs(amount_sat - int(lnaddr.get_amount_sat())) > 1:
-                raise InvalidBitcoinURI("Inconsistent lightning field in bip21: amount")
-        address = out.get('address')
-        ln_fallback_addr = lnaddr.get_fallback_address()
-        if address and ln_fallback_addr:
-            if ln_fallback_addr != address:
-                raise InvalidBitcoinURI("Inconsistent lightning field in bip21: address")
-
-    r = out.get('r')
-    sig = out.get('sig')
-    name = out.get('name')
-    if on_pr and (r or (name and sig)):
-        @log_exceptions
-        async def get_payment_request():
-            from . import paymentrequest as pr
-            if name and sig:
-                s = pr.serialize_request(out).SerializeToString()
-                request = pr.PaymentRequest(s)
-            else:
-                request = await pr.get_payment_request(r)
-            if on_pr:
-                on_pr(request)
-        loop = loop or get_asyncio_loop()
-        asyncio.run_coroutine_threadsafe(get_payment_request(), loop)
-
-    return out
-
-
-def create_bip21_uri(addr, amount_sat: Optional[int], message: Optional[str],
-                     *, extra_query_params: Optional[dict] = None) -> str:
-    from . import bitcoin
-    if not bitcoin.is_address(addr):
-        return ""
-    if extra_query_params is None:
-        extra_query_params = {}
-    query = []
-    if amount_sat:
-        query.append('amount=%s'%format_satoshis_plain(amount_sat))
-    if message:
-        query.append('message=%s'%urllib.parse.quote(message))
-    for k, v in extra_query_params.items():
-        if not isinstance(k, str) or k != urllib.parse.quote(k):
-            raise Exception(f"illegal key for URI: {repr(k)}")
-        v = urllib.parse.quote(v)
-        query.append(f"{k}={v}")
-    p = urllib.parse.ParseResult(
-        scheme=BITCOIN_BIP21_URI_SCHEME,
-        netloc='',
-        path=addr,
-        params='',
-        query='&'.join(query),
-        fragment='',
-    )
-    return str(urllib.parse.urlunparse(p))
-
-
-def maybe_extract_lightning_payment_identifier(data: str) -> Optional[str]:
-    data = data.strip()  # whitespaces
-    data = data.lower()
-    if data.startswith(LIGHTNING_URI_SCHEME + ':ln'):
-        cut_prefix = LIGHTNING_URI_SCHEME + ':'
-        data = data[len(cut_prefix):]
-    if data.startswith('ln'):
-        return data
-    return None
-
-
-def is_uri(data: str) -> bool:
-    data = data.lower()
-    if (data.startswith(LIGHTNING_URI_SCHEME + ":") or
-            data.startswith(BITCOIN_BIP21_URI_SCHEME + ':')):
-        return True
-    return False
-
-
-class FailedToParsePaymentIdentifier(Exception):
-    pass
 
 
 # Python bug (http://bugs.python.org/issue1927) causes raw_input
@@ -1249,8 +1123,7 @@ def read_json_file(path):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.loads(f.read())
-    #backwards compatibility for JSONDecodeError
-    except ValueError:
+    except json.JSONDecodeError:
         _logger.exception('')
         raise FileImportFailed(_("Invalid JSON code."))
     except BaseException as e:
@@ -1441,7 +1314,7 @@ def make_aiohttp_session(proxy: Optional[dict], headers=None, timeout=None):
             port=int(proxy['port']),
             username=proxy.get('user', None),
             password=proxy.get('password', None),
-            rdns=True,
+            rdns=True,  # needed to prevent DNS leaks over proxy
             ssl=ssl_context,
         )
     else:
@@ -1543,6 +1416,36 @@ aiorpcx.curio._set_task_deadline   = _aiorpcx_monkeypatched_set_task_deadline
 aiorpcx.curio._unset_task_deadline = _aiorpcx_monkeypatched_unset_task_deadline
 
 
+async def wait_for2(fut: Awaitable, timeout: Union[int, float, None]):
+    """Replacement for asyncio.wait_for,
+     due to bugs: https://bugs.python.org/issue42130 and https://github.com/python/cpython/issues/86296 ,
+     which are only fixed in python 3.12+.
+     """
+    if sys.version_info[:3] >= (3, 12):
+        return await asyncio.wait_for(fut, timeout)
+    else:
+        async with async_timeout(timeout):
+            return await asyncio.ensure_future(fut, loop=get_running_loop())
+
+
+if hasattr(asyncio, 'timeout'):  # python 3.11+
+    async_timeout = asyncio.timeout
+else:
+    class TimeoutAfterAsynciolike(aiorpcx.curio.TimeoutAfter):
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            try:
+                await super().__aexit__(exc_type, exc_value, traceback)
+            except (aiorpcx.TaskTimeout, aiorpcx.UncaughtTimeoutError):
+                raise asyncio.TimeoutError from None
+            except aiorpcx.TimeoutCancellationError:
+                raise asyncio.CancelledError from None
+
+    def async_timeout(delay: Union[int, float, None]):
+        if delay is None:
+            return nullcontext()
+        return TimeoutAfterAsynciolike(delay)
+
+
 class NetworkJobOnDefaultServer(Logger, ABC):
     """An abstract base class for a job that runs on the main network
     interface. Every time the main interface changes, the job is
@@ -1641,9 +1544,7 @@ def detect_tor_socks_proxy() -> Optional[Tuple[str, int]]:
 
 def is_tor_socks_port(host: str, port: int) -> bool:
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.1)
-            s.connect((host, port))
+        with socket.create_connection((host, port), timeout=10) as s:
             # mimic "tor-resolve 0.0.0.0".
             # see https://github.com/spesmilo/electrum/issues/7317#issuecomment-1369281075
             # > this is a socks5 handshake, followed by a socks RESOLVE request as defined in
@@ -1850,6 +1751,7 @@ def list_enabled_bits(x: int) -> Sequence[int]:
 
 
 def resolve_dns_srv(host: str):
+    # FIXME this method is not using the network proxy. (although the proxy might not support UDP?)
     srv_records = dns.resolver.resolve(host, 'SRV')
     # priority: prefer lower
     # weight: tie breaker; prefer higher
@@ -1865,19 +1767,23 @@ def resolve_dns_srv(host: str):
 
 def randrange(bound: int) -> int:
     """Return a random integer k such that 1 <= k < bound, uniformly
-    distributed across that range."""
+    distributed across that range.
+    This is guaranteed to be cryptographically strong.
+    """
     # secrets.randbelow(bound) returns a random int: 0 <= r < bound,
     # hence transformations:
     return secrets.randbelow(bound - 1) + 1
 
 
-class CallbackManager:
+class CallbackManager(Logger):
     # callbacks set by the GUI or any thread
     # guarantee: the callbacks will always get triggered from the asyncio thread.
 
     def __init__(self):
+        Logger.__init__(self)
         self.callback_lock = threading.Lock()
         self.callbacks = defaultdict(list)      # note: needs self.callback_lock
+        self._running_cb_futs = set()
 
     def register_callback(self, func, events):
         with self.callback_lock:
@@ -1900,15 +1806,27 @@ class CallbackManager:
         with self.callback_lock:
             callbacks = self.callbacks[event][:]
         for callback in callbacks:
-            # FIXME: if callback throws, we will lose the traceback
-            if asyncio.iscoroutinefunction(callback):
-                asyncio.run_coroutine_threadsafe(callback(*args), loop)
-            elif get_running_loop() == loop:
-                # run callback immediately, so that it is guaranteed
-                # to have been executed when this method returns
-                callback(*args)
-            else:
-                loop.call_soon_threadsafe(callback, *args)
+            if asyncio.iscoroutinefunction(callback):  # async cb
+                fut = asyncio.run_coroutine_threadsafe(callback(*args), loop)
+                # keep strong references around to avoid GC issues:
+                self._running_cb_futs.add(fut)
+                def on_done(fut_: concurrent.futures.Future):
+                    assert fut_.done()
+                    self._running_cb_futs.remove(fut_)
+                    if fut_.cancelled():
+                        self.logger.debug(f"cb cancelled. {event=}.")
+                    elif exc := fut_.exception():
+                        self.logger.error(f"cb errored. {event=}. {exc=}", exc_info=exc)
+                fut.add_done_callback(on_done)
+            else:  # non-async cb
+                # note: the cb needs to run in the asyncio thread
+                if get_running_loop() == loop:
+                    # run callback immediately, so that it is guaranteed
+                    # to have been executed when this method returns
+                    callback(*args)
+                else:
+                    # note: if cb raises, asyncio will log the exception
+                    loop.call_soon_threadsafe(callback, *args)
 
 
 callback_mgr = CallbackManager()
@@ -1949,7 +1867,8 @@ def event_listener(func):
 
 
 _NetAddrType = TypeVar("_NetAddrType")
-
+# requirements for _NetAddrType:
+# - reasonable __hash__() implementation (e.g. based on host/port of remote endpoint)
 
 class NetworkRetryManager(Generic[_NetAddrType]):
     """Truncated Exponential Backoff for network connections."""
@@ -2013,6 +1932,8 @@ class NetworkRetryManager(Generic[_NetAddrType]):
 
 
 class MySocksProxy(aiorpcx.SOCKSProxy):
+    # note: proxy will not leak DNS as create_connection()
+    # sets (local DNS) resolve=False by default
 
     async def open_connection(self, host=None, port=None, **kwargs):
         loop = asyncio.get_running_loop()
@@ -2042,6 +1963,20 @@ class MySocksProxy(aiorpcx.SOCKSProxy):
         return ret
 
 
+class JsonRPCError(Exception):
+
+    class Codes(enum.IntEnum):
+        # application-specific error codes
+        USERFACING = 1
+        INTERNAL = 2
+
+    def __init__(self, *, code: int, message: str, data: Optional[dict] = None):
+        Exception.__init__(self)
+        self.code = code
+        self.message = message
+        self.data = data
+
+
 class JsonRPCClient:
 
     def __init__(self, session: aiohttp.ClientSession, url: str):
@@ -2050,6 +1985,10 @@ class JsonRPCClient:
         self._id = 0
 
     async def request(self, endpoint, *args):
+        """Send request to server, parse and return result.
+        note: parsing code is naive, the server is assumed to be well-behaved.
+              Up to the caller to handle exceptions, including those arising from parsing errors.
+        """
         self._id += 1
         data = ('{"jsonrpc": "2.0", "id":"%d", "method": "%s", "params": %s }'
                 % (self._id, endpoint, json.dumps(args)))
@@ -2059,7 +1998,7 @@ class JsonRPCClient:
                 result = r.get('result')
                 error = r.get('error')
                 if error:
-                    return 'Error: ' + str(error)
+                    raise JsonRPCError(code=error["code"], message=error["message"], data=error.get("data"))
                 else:
                     return result
             else:
@@ -2124,6 +2063,22 @@ class nullcontext:
         pass
 
 
+def traceback_format_exception(exc: BaseException) -> Sequence[str]:
+    """Compatibility wrapper for stdlib traceback.format_exception using python 3.10+ API."""
+    if sys.version_info[:3] >= (3, 10):
+        return traceback.format_exception(exc)
+    else:
+        return traceback.format_exception(type(exc), value=exc, tb=exc.__traceback__)
+
+
+class classproperty(property):
+    """~read-only class-level @property
+    from https://stackoverflow.com/a/13624858 by denis-ryzhkov
+    """
+    def __get__(self, owner_self, owner_cls):
+        return self.fget(owner_cls)
+
+
 def get_running_loop() -> Optional[asyncio.AbstractEventLoop]:
     """Returns the asyncio event loop that is *running in this thread*, if any."""
     try:
@@ -2132,14 +2087,17 @@ def get_running_loop() -> Optional[asyncio.AbstractEventLoop]:
         return None
 
 
-def error_text_str_to_safe_str(err: str) -> str:
+def error_text_str_to_safe_str(err: str, *, max_len: Optional[int] = 500) -> str:
     """Converts an untrusted error string to a sane printable ascii str.
     Never raises.
     """
-    return error_text_bytes_to_safe_str(err.encode("ascii", errors='backslashreplace'))
+    text = error_text_bytes_to_safe_str(
+        err.encode("ascii", errors='backslashreplace'),
+        max_len=None)
+    return truncate_text(text, max_len=max_len)
 
 
-def error_text_bytes_to_safe_str(err: bytes) -> str:
+def error_text_bytes_to_safe_str(err: bytes, *, max_len: Optional[int] = 500) -> str:
     """Converts an untrusted error bytes text to a sane printable ascii str.
     Never raises.
 
@@ -2152,4 +2110,12 @@ def error_text_bytes_to_safe_str(err: bytes) -> str:
     # convert to ascii, to get rid of unicode stuff
     ascii_text = err.decode("ascii", errors='backslashreplace')
     # do repr to handle ascii special chars (especially when printing/logging the str)
-    return repr(ascii_text)
+    text = repr(ascii_text)
+    return truncate_text(text, max_len=max_len)
+
+
+def truncate_text(text: str, *, max_len: Optional[int]) -> str:
+    if max_len is None or len(text) <= max_len:
+        return text
+    else:
+        return text[:max_len] + f"... (truncated. orig_len={len(text)})"

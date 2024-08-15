@@ -12,8 +12,7 @@ from PyQt5.QtWidgets import (QComboBox, QLabel, QVBoxLayout, QGridLayout, QLineE
 from electrum.bitcoin import is_address
 from electrum.i18n import _
 from electrum.util import InvoiceError
-from electrum.invoices import PR_DEFAULT_EXPIRATION_WHEN_CREATING
-from electrum.invoices import PR_EXPIRED, pr_expiration_values
+from electrum.invoices import pr_expiration_values
 from electrum.logging import Logger
 
 from .amountedit import AmountEdit, BTCAmountEdit, SizedFreezableLineEdit
@@ -91,8 +90,10 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
         self.receive_qr = QRCodeWidget(manual_size=True)
 
         self.receive_help_text = WWLabel('')
+        self.receive_help_text.setLayout(QHBoxLayout())
         self.receive_rebalance_button = QPushButton('Rebalance')
         self.receive_rebalance_button.suggestion = None
+
         def on_receive_rebalance():
             if self.receive_rebalance_button.suggestion:
                 chan1, chan2, delta = self.receive_rebalance_button.suggestion
@@ -100,6 +101,7 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
         self.receive_rebalance_button.clicked.connect(on_receive_rebalance)
         self.receive_swap_button = QPushButton('Swap')
         self.receive_swap_button.suggestion = None
+
         def on_receive_swap():
             if self.receive_swap_button.suggestion:
                 chan, swap_recv_amount_sat = self.receive_swap_button.suggestion
@@ -146,13 +148,8 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
         self.update_view_button()
         self.toolbar.insertWidget(2, self.toggle_view_button)
         # menu
-        menu.addConfig(
-            _('Add on-chain fallback to lightning requests'), 'bolt11_fallback', True,
-            callback=self.on_toggle_bolt11_fallback)
-        menu.addConfig(
-            _('Add lightning requests to bitcoin URIs'), 'bip21_lightning', False,
-            tooltip=_('This may result in large QR codes'),
-            callback=self.update_current_request)
+        menu.addConfig(self.config.cv.WALLET_BOLT11_FALLBACK, callback=self.on_toggle_bolt11_fallback)
+        menu.addConfig(self.config.cv.WALLET_BIP21_LIGHTNING, callback=self.update_current_request)
         self.qr_menu_action = menu.addToggle(_("Show detached QR code window"), self.window.toggle_qr_window)
         menu.addAction(_("Import requests"), self.window.import_requests)
         menu.addAction(_("Export requests"), self.window.export_requests)
@@ -166,7 +163,7 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
         hbox = QHBoxLayout()
         hbox.addLayout(vbox_g)
         hbox.addStretch()
-        hbox.addWidget(self.receive_widget)
+        hbox.addWidget(self.receive_widget, 1)
 
         self.searchable_list = self.request_list
         vbox = QVBoxLayout(self)
@@ -181,8 +178,8 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
         self.update_expiry_text()
 
     def update_expiry_text(self):
-        expiry = self.config.get('request_expiry', PR_DEFAULT_EXPIRATION_WHEN_CREATING)
-        text = pr_expiration_values[expiry]
+        expiry = self.config.WALLET_PAYREQ_EXPIRY_SECONDS
+        text = pr_expiration_values()[expiry]
         self.expiry_button.setText(text)
 
     def expiry_dialog(self):
@@ -196,11 +193,11 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
             '\n\n',
             _('For Lightning requests, payments will not be accepted after the expiration.'),
         ])
-        expiry = self.config.get('request_expiry', PR_DEFAULT_EXPIRATION_WHEN_CREATING)
-        v = self.window.query_choice(msg, pr_expiration_values, title=_('Expiry'), default_choice=expiry)
+        expiry = self.config.WALLET_PAYREQ_EXPIRY_SECONDS
+        v = self.window.query_choice(msg, pr_expiration_values(), title=_('Expiry'), default_choice=expiry)
         if v is None:
             return
-        self.config.set_key('request_expiry', v)
+        self.config.WALLET_PAYREQ_EXPIRY_SECONDS = v
         self.update_expiry_text()
 
     def on_toggle_bolt11_fallback(self):
@@ -210,7 +207,7 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
         self.update_current_request()
 
     def update_view_button(self):
-        i = self.config.get('receive_tabs_index', 0)
+        i = self.config.GUI_QT_RECEIVE_TABS_INDEX
         if i == 0:
             icon, text = read_QIcon("link.png"), _('Bitcoin URI')
         elif i == 1:
@@ -221,30 +218,30 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
         self.toggle_view_button.setIcon(icon)
 
     def toggle_view(self):
-        i = self.config.get('receive_tabs_index', 0)
+        i = self.config.GUI_QT_RECEIVE_TABS_INDEX
         i = (i + 1) % (3 if self.wallet.has_lightning() else 2)
-        self.config.set_key('receive_tabs_index', i)
+        self.config.GUI_QT_RECEIVE_TABS_INDEX = i
         self.update_current_request()
         self.update_view_button()
 
     def on_tab_changed(self):
         text, data, help_text, title = self.get_tab_data()
-        self.window.do_copy(data, title=title)
+        self.window.do_copy(text, title=title)
         self.update_receive_qr_window()
 
     def do_copy(self, e):
         if e.button() != Qt.LeftButton:
             return
         text, data, help_text, title = self.get_tab_data()
-        self.window.do_copy(data, title=title)
+        self.window.do_copy(text, title=title)
 
     def toggle_receive_qr(self):
-        b = not self.config.get('receive_qr_visible', False)
-        self.config.set_key('receive_qr_visible', b)
+        b = not self.config.GUI_QT_RECEIVE_TAB_QR_VISIBLE
+        self.config.GUI_QT_RECEIVE_TAB_QR_VISIBLE = b
         self.update_receive_widgets()
 
     def update_receive_widgets(self):
-        b = self.config.get('receive_qr_visible', False)
+        b = self.config.GUI_QT_RECEIVE_TAB_QR_VISIBLE
         self.receive_widget.update_visibility(b)
 
     def update_current_request(self):
@@ -286,7 +283,7 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
         self.update_receive_qr_window()
 
     def get_tab_data(self):
-        i = self.config.get('receive_tabs_index', 0)
+        i = self.config.GUI_QT_RECEIVE_TABS_INDEX
         if i == 0:
             out = self.URI, self.URI, self.URI_help, _('Bitcoin URI')
         elif i == 1:
@@ -305,7 +302,7 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
     def create_invoice(self):
         amount_sat = self.receive_amount_e.get_amount()
         message = self.receive_message_e.text()
-        expiry = self.config.get('request_expiry', PR_DEFAULT_EXPIRATION_WHEN_CREATING)
+        expiry = self.config.WALLET_PAYREQ_EXPIRY_SECONDS
 
         if amount_sat and amount_sat < self.wallet.dust_threshold():
             address = None
@@ -369,7 +366,6 @@ class ReceiveTab(QWidget, MessageBoxMixin, Logger):
         self.request_list.clearSelection()
 
 
-
 class ReceiveWidget(QWidget):
     min_size = QSize(200, 200)
 
@@ -379,8 +375,6 @@ class ReceiveWidget(QWidget):
         self.qr = qr
         self.help_widget = help_widget
         self.setMinimumSize(self.min_size)
-        for w in [textedit, qr, help_widget]:
-            w.setMinimumSize(self.min_size)
 
         for w in [textedit, qr]:
             w.mousePressEvent = receive_tab.do_copy
@@ -390,12 +384,18 @@ class ReceiveWidget(QWidget):
         if isinstance(help_widget, QLabel):
             help_widget.setFrameStyle(QFrame.StyledPanel)
             help_widget.setStyleSheet("QLabel {border:1px solid gray; border-radius:2px; }")
+
         hbox = QHBoxLayout()
-        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.addStretch()
         hbox.addWidget(textedit)
         hbox.addWidget(help_widget)
         hbox.addWidget(qr)
-        self.setLayout(hbox)
+
+        vbox = QVBoxLayout()
+        vbox.addLayout(hbox)
+        vbox.addStretch()
+
+        self.setLayout(vbox)
 
     def update_visibility(self, is_qr):
         if str(self.textedit.toPlainText()):
@@ -410,9 +410,13 @@ class ReceiveWidget(QWidget):
     def resizeEvent(self, e):
         # keep square aspect ratio when resized
         size = e.size()
-        w = size.height()
-        self.setFixedWidth(w)
+        margin = 10
+        x = min(size.height(), size.width()) - margin
+        for w in [self.textedit, self.qr, self.help_widget]:
+            w.setFixedWidth(x)
+            w.setFixedHeight(x)
         return super().resizeEvent(e)
+
 
 class FramedWidget(QFrame):
     def __init__(self):

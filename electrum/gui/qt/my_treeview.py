@@ -24,6 +24,7 @@
 # SOFTWARE.
 
 import asyncio
+import contextlib
 import enum
 import os.path
 import time
@@ -59,6 +60,9 @@ from electrum.util import EventListener, event_listener
 from electrum.invoices import PR_UNPAID, PR_PAID, PR_EXPIRED, PR_INFLIGHT, PR_UNKNOWN, PR_FAILED, PR_ROUTING, PR_UNCONFIRMED
 from electrum.logging import Logger
 from electrum.qrreader import MissingQrDetectionLib
+from electrum.simple_config import ConfigVarWithConfig
+
+from electrum.gui import messages
 
 from .util import read_QIcon
 
@@ -67,9 +71,9 @@ if TYPE_CHECKING:
     from .main_window import ElectrumWindow
 
 
-class MyMenu(QMenu):
+class QMenuWithConfig(QMenu):
 
-    def __init__(self, config):
+    def __init__(self, config: 'SimpleConfig'):
         QMenu.__init__(self)
         self.setToolTipsVisible(True)
         self.config = config
@@ -80,23 +84,36 @@ class MyMenu(QMenu):
         m.setToolTip(tooltip)
         return m
 
-    def addConfig(self, text: str, name: str, default: bool, *, tooltip='', callback=None) -> QAction:
-        b = self.config.get(name, default)
-        m = self.addAction(text, lambda: self._do_toggle_config(name, default, callback))
+    def addConfig(
+        self,
+        configvar: 'ConfigVarWithConfig',
+        *,
+        callback=None,
+        checked: Optional[bool] = None,  # to override initial state of checkbox
+        short_desc: Optional[str] = None,
+    ) -> QAction:
+        assert isinstance(configvar, ConfigVarWithConfig), configvar
+        if short_desc is None:
+            short_desc = configvar.get_short_desc()
+            assert short_desc is not None, f"short_desc missing for {configvar}"
+        if checked is None:
+            checked = bool(configvar.get())
+        m = self.addAction(short_desc, lambda: self._do_toggle_config(configvar, callback=callback))
         m.setCheckable(True)
-        m.setChecked(bool(b))
-        m.setToolTip(tooltip)
+        m.setChecked(checked)
+        if (long_desc := configvar.get_long_desc()) is not None:
+            m.setToolTip(messages.to_rtf(long_desc))
         return m
 
-    def _do_toggle_config(self, name, default, callback):
-        b = self.config.get(name, default)
-        self.config.set_key(name, not b)
+    def _do_toggle_config(self, configvar: 'ConfigVarWithConfig', *, callback):
+        b = configvar.get()
+        configvar.set(not b)
         if callback:
             callback()
 
 
 def create_toolbar_with_menu(config: 'SimpleConfig', title):
-    menu = MyMenu(config)
+    menu = QMenuWithConfig(config)
     toolbar_button = QToolButton()
     toolbar_button.setIcon(read_QIcon("preferences.png"))
     toolbar_button.setMenu(menu)
@@ -387,7 +404,7 @@ class MyTreeView(QTreeView):
         for row in range(self.model().rowCount()):
             self.hide_row(row)
 
-    def create_toolbar(self, config):
+    def create_toolbar(self, config: 'SimpleConfig'):
         return
 
     def create_toolbar_buttons(self):
@@ -402,13 +419,13 @@ class MyTreeView(QTreeView):
     def create_toolbar_with_menu(self, title):
         return create_toolbar_with_menu(self.config, title)
 
-    CONFIG_KEY_SHOW_TOOLBAR = None  # type: Optional[str]
+    configvar_show_toolbar = None  # type: Optional[ConfigVarWithConfig]
     _toolbar_checkbox = None  # type: Optional[QAction]
     def show_toolbar(self, state: bool = None):
         if state is None:  # get value from config
-            if self.config and self.CONFIG_KEY_SHOW_TOOLBAR:
-                state = self.config.get(self.CONFIG_KEY_SHOW_TOOLBAR, None)
-            if state is None:
+            if self.configvar_show_toolbar:
+                state = self.configvar_show_toolbar.get()
+            else:
                 return
         assert isinstance(state, bool), state
         if state == self.toolbar_shown:
@@ -428,8 +445,8 @@ class MyTreeView(QTreeView):
     def toggle_toolbar(self):
         new_state = not self.toolbar_shown
         self.show_toolbar(new_state)
-        if self.config and self.CONFIG_KEY_SHOW_TOOLBAR:
-            self.config.set_key(self.CONFIG_KEY_SHOW_TOOLBAR, new_state)
+        if self.configvar_show_toolbar:
+            self.configvar_show_toolbar.set(new_state)
 
     def add_copy_menu(self, menu: QMenu, idx) -> QMenu:
         cc = menu.addMenu(_("Copy"))

@@ -19,8 +19,8 @@ git -C "$PROJECT_ROOT" rev-parse 2>/dev/null || fail "Building outside a git clo
 export GCC_STRIP_BINARIES="1"
 
 # pinned versions
-PYTHON_VERSION=3.9.15
-PY_VER_MAJOR="3.9"  # as it appears in fs paths
+PYTHON_VERSION=3.11.9
+PY_VER_MAJOR="3.11"  # as it appears in fs paths
 PKG2APPIMAGE_COMMIT="a9c85b7e61a3a883f4a35c41c5decb5af88b6b5d"
 
 VERSION=$(git describe --tags --dirty --always)
@@ -41,7 +41,7 @@ download_if_not_exist "$CACHEDIR/appimagetool" "https://github.com/AppImage/AppI
 verify_hash "$CACHEDIR/appimagetool" "df3baf5ca5facbecfc2f3fa6713c29ab9cefa8fd8c1eac5d283b79cab33e4acb"
 
 download_if_not_exist "$CACHEDIR/Python-$PYTHON_VERSION.tar.xz" "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
-verify_hash "$CACHEDIR/Python-$PYTHON_VERSION.tar.xz" "12daff6809528d9f6154216950423c9e30f0e47336cb57c6aa0b4387dd5eb4b2"
+verify_hash "$CACHEDIR/Python-$PYTHON_VERSION.tar.xz" "9b1e896523fc510691126c864406d9360a3d1e986acbda59cda57b5abda45b87"
 
 
 
@@ -55,8 +55,8 @@ tar xf "$CACHEDIR/Python-$PYTHON_VERSION.tar.xz" -C "$CACHEDIR"
     cd "$CACHEDIR/Python-$PYTHON_VERSION"
     LC_ALL=C export BUILD_DATE=$(date -u -d "@$SOURCE_DATE_EPOCH" "+%b %d %Y")
     LC_ALL=C export BUILD_TIME=$(date -u -d "@$SOURCE_DATE_EPOCH" "+%H:%M:%S")
-    # Patch taken from Ubuntu http://archive.ubuntu.com/ubuntu/pool/main/p/python3.9/python3.9_3.9.5-3~21.04.debian.tar.xz
-    patch -p1 < "$CONTRIB_APPIMAGE/patches/python-3.9-reproducible-buildinfo.diff"
+    # Patches taken from Ubuntu http://archive.ubuntu.com/ubuntu/pool/main/p/python3.11/python3.11_3.11.6-3.debian.tar.xz
+    patch -p1 < "$CONTRIB_APPIMAGE/patches/python-3.11-reproducible-buildinfo.diff"
     ./configure \
         --cache-file="$CACHEDIR/python.config.cache" \
         --prefix="$APPDIR/usr" \
@@ -84,6 +84,15 @@ else
     "$CONTRIB"/make_libsecp256k1.sh || fail "Could not build libsecp"
 fi
 cp -f "$DLL_TARGET_DIR"/libsecp256k1.so.* "$APPDIR/usr/lib/" || fail "Could not copy libsecp to its destination"
+
+
+if [ -f "$DLL_TARGET_DIR/libzbar.so.0" ]; then
+    info "libzbar already built, skipping"
+else
+    # note: could instead just use the libzbar0 pkg from debian/apt, but that is too old and missing fixes for CVE-2023-40889
+    "$CONTRIB"/make_zbar.sh || fail "Could not build zbar"
+fi
+cp -f "$DLL_TARGET_DIR/libzbar.so.0" "$APPDIR/usr/lib/" || fail "Could not copy libzbar to its destination"
 
 
 # note: libxcb-util1 is not available in debian 10 (buster), only libxcb-util0. So we build it ourselves.
@@ -173,10 +182,6 @@ info "installing electrum and its dependencies."
 
 # was only needed during build time, not runtime
 "$python" -m pip uninstall -y Cython
-
-
-info "copying zbar"
-cp "/usr/lib/x86_64-linux-gnu/libzbar.so.0" "$APPDIR/usr/lib/libzbar.so.0"
 
 
 info "desktop integration."

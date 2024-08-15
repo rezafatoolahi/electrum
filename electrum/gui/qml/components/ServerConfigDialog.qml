@@ -1,7 +1,7 @@
-import QtQuick 2.6
-import QtQuick.Layouts 1.0
-import QtQuick.Controls 2.14
-import QtQuick.Controls.Material 2.0
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls
+import QtQuick.Controls.Material
 
 import org.electrum 1.0
 
@@ -11,6 +11,7 @@ ElDialog {
     id: rootItem
 
     title: qsTr('Server settings')
+    iconSource: Qt.resolvedUrl('../../icons/network.png')
 
     width: parent.width
     height: parent.height

@@ -119,9 +119,6 @@ class ChannelsList(MyTreeView):
     def on_channel_closed(self, txid):
         self.main_window.show_error('Channel closed' + '\n' + txid)
 
-    def on_request_sent(self, b):
-        self.main_window.show_message(_('Request sent'))
-
     def on_failure(self, exc_info):
         type_, e, tb = exc_info
         traceback.print_tb(tb)
@@ -137,7 +134,7 @@ class ChannelsList(MyTreeView):
         on_success = self.on_channel_closed
         def task():
             return self.network.run_from_another_thread(coro)
-        WaitingDialog(self, 'please wait..', task, on_success, self.on_failure)
+        WaitingDialog(self, _('Please wait...'), task, on_success, self.on_failure)
 
     def force_close(self, channel_id):
         self.save_backup = True
@@ -161,7 +158,7 @@ class ChannelsList(MyTreeView):
         def task():
             coro = self.lnworker.force_close_channel(channel_id)
             return self.network.run_from_another_thread(coro)
-        WaitingDialog(self, 'please wait..', task, self.on_channel_closed, self.on_failure)
+        WaitingDialog(self, _('Please wait...'), task, self.on_channel_closed, self.on_failure)
 
     def remove_channel(self, channel_id):
         if self.main_window.question(_('Are you sure you want to delete this channel? This will purge associated transactions from your wallet history.')):
@@ -191,11 +188,16 @@ class ChannelsList(MyTreeView):
         def task():
             coro = self.lnworker.request_force_close(channel_id)
             return self.network.run_from_another_thread(coro)
-        WaitingDialog(self, 'please wait..', task, self.on_request_sent, self.on_failure)
+        def on_done(b):
+            self.main_window.show_message(_('Request scheduled'))
+        WaitingDialog(self, _('Please wait...'), task, on_done, self.on_failure)
 
-    def freeze_channel_for_sending(self, chan, b):
+    def set_frozen(self, chan, *, for_sending, value):
         if not self.lnworker.uses_trampoline() or self.lnworker.is_trampoline_peer(chan.node_id):
-            chan.set_frozen_for_sending(b)
+            if for_sending:
+                chan.set_frozen_for_sending(value)
+            else:
+                chan.set_frozen_for_receiving(value)
         else:
             msg = messages.MSG_NON_TRAMPOLINE_CHANNEL_FROZEN_WITHOUT_GOSSIP
             self.main_window.show_warning(msg, title=_('Channel is frozen for sending'))
@@ -258,13 +260,13 @@ class ChannelsList(MyTreeView):
         if not chan.is_backup() and not chan.is_closed():
             fm = menu.addMenu(_("Freeze"))
             if not chan.is_frozen_for_sending():
-                fm.addAction(_("Freeze for sending"), lambda: self.freeze_channel_for_sending(chan, True))
+                fm.addAction(_("Freeze for sending"), lambda: self.set_frozen(chan, for_sending=True, value=True))
             else:
-                fm.addAction(_("Unfreeze for sending"), lambda: self.freeze_channel_for_sending(chan, False))
+                fm.addAction(_("Unfreeze for sending"), lambda: self.set_frozen(chan, for_sending=True, value=False))
             if not chan.is_frozen_for_receiving():
-                fm.addAction(_("Freeze for receiving"), lambda: chan.set_frozen_for_receiving(True))
+                fm.addAction(_("Freeze for receiving"), lambda: self.set_frozen(chan, for_sending=False, value=True))
             else:
-                fm.addAction(_("Unfreeze for receiving"), lambda: chan.set_frozen_for_receiving(False))
+                fm.addAction(_("Unfreeze for receiving"), lambda: self.set_frozen(chan, for_sending=False, value=False))
         if close_opts := chan.get_close_options():
             cm = menu.addMenu(_("Close"))
             if ChanCloseOption.COOP_CLOSE in close_opts:
@@ -328,6 +330,7 @@ class ChannelsList(MyTreeView):
             self._update_chan_frozen_bg(chan=chan, items=items)
             self.model().insertRow(0, items)
 
+        # FIXME sorting by SHORT_CHANID should treat values as tuple, not as string ( 50x1x1 > 8x1x1 )
         self.sortByColumn(self.Columns.SHORT_CHANID, Qt.DescendingOrder)
 
     def _update_chan_frozen_bg(self, *, chan: AbstractChannel, items: Sequence[QStandardItem]):

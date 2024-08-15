@@ -25,7 +25,7 @@
 
 from decimal import Decimal
 from functools import partial
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union, Callable
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
@@ -39,6 +39,7 @@ from electrum.plugin import run_hook
 from electrum.transaction import Transaction, PartialTransaction
 from electrum.wallet import InternalAddressCorruption
 from electrum.simple_config import SimpleConfig
+from electrum.bitcoin import DummyAddress
 
 from .util import (WindowModalDialog, ColorScheme, HelpLabel, Buttons, CancelButton,
                    BlockingWaitingDialog, PasswordLineEdit, WWLabel, read_QIcon)
@@ -46,6 +47,7 @@ from .util import (WindowModalDialog, ColorScheme, HelpLabel, Buttons, CancelBut
 from .fee_slider import FeeSlider, FeeComboBox
 
 if TYPE_CHECKING:
+    from electrum.simple_config import ConfigVarWithConfig
     from .main_window import ElectrumWindow
 
 from .transaction_dialog import TxSizeLabel, TxFiatLabel, TxInOutWidget
@@ -96,15 +98,16 @@ class TxEditor(WindowModalDialog):
         vbox.addLayout(grid)
         vbox.addWidget(self.io_widget)
         self.message_label = WWLabel('')
+        self.message_label.setMinimumHeight(70)
         vbox.addWidget(self.message_label)
 
         buttons = self.create_buttons_bar()
         vbox.addStretch(1)
         vbox.addLayout(buttons)
 
-        self.set_io_visible(self.config.get('show_tx_io', False))
-        self.set_fee_edit_visible(self.config.get('show_tx_fee_details', False))
-        self.set_locktime_visible(self.config.get('show_tx_locktime', False))
+        self.set_io_visible(self.config.GUI_QT_TX_EDITOR_SHOW_IO)
+        self.set_fee_edit_visible(self.config.GUI_QT_TX_EDITOR_SHOW_FEE_DETAILS)
+        self.set_locktime_visible(self.config.GUI_QT_TX_EDITOR_SHOW_LOCKTIME)
         self.update_fee_target()
         self.resize(self.layout().sizeHint())
 
@@ -127,11 +130,11 @@ class TxEditor(WindowModalDialog):
     def set_fee_config(self, dyn, pos, fee_rate):
         if dyn:
             if self.config.use_mempool_fees():
-                self.config.set_key('depth_level', pos, save=False)
+                self.config.cv.FEE_EST_DYNAMIC_MEMPOOL_SLIDERPOS.set(pos, save=False)
             else:
-                self.config.set_key('fee_level', pos, save=False)
+                self.config.cv.FEE_EST_DYNAMIC_ETA_SLIDERPOS.set(pos, save=False)
         else:
-            self.config.set_key('fee_per_kb', fee_rate, save=False)
+            self.config.cv.FEE_EST_STATIC_FEERATE.set(fee_rate, save=False)
 
     def update_tx(self, *, fallback_to_zero_fee: bool = False):
         # expected to set self.tx, self.message and self.error
@@ -382,19 +385,17 @@ class TxEditor(WindowModalDialog):
             m.setChecked(b)
             m.setToolTip(tooltip)
             return m
-        add_pref_action(
-            self.config.get('show_tx_io', False),
-            self.toggle_io_visibility,
-            _('Show inputs and outputs'), '')
-        add_pref_action(
-            self.config.get('show_tx_fee_details', False),
-            self.toggle_fee_details,
-            _('Edit fees manually'), '')
-        add_pref_action(
-            self.config.get('show_tx_locktime', False),
-            self.toggle_locktime,
-            _('Edit Locktime'), '')
+        def add_cv_action(configvar: 'ConfigVarWithConfig', action: Callable[[], None]):
+            b = configvar.get()
+            short_desc = configvar.get_short_desc()
+            assert short_desc is not None, f"short_desc missing for {configvar}"
+            tooltip = configvar.get_long_desc() or ""
+            return add_pref_action(b, action, short_desc, tooltip)
+        add_cv_action(self.config.cv.GUI_QT_TX_EDITOR_SHOW_IO, self.toggle_io_visibility)
+        add_cv_action(self.config.cv.GUI_QT_TX_EDITOR_SHOW_FEE_DETAILS, self.toggle_fee_details)
+        add_cv_action(self.config.cv.GUI_QT_TX_EDITOR_SHOW_LOCKTIME, self.toggle_locktime)
         self.pref_menu.addSeparator()
+        add_cv_action(self.config.cv.WALLET_SEND_CHANGE_TO_LIGHTNING, self.toggle_send_change_to_lightning)
         add_pref_action(
             self.wallet.use_change,
             self.toggle_use_change,
@@ -409,24 +410,10 @@ class TxEditor(WindowModalDialog):
                 _('This may result in higher transactions fees.')
             ]))
         self.use_multi_change_menu.setEnabled(self.wallet.use_change)
-        add_pref_action(
-            self.config.get('batch_rbf', False),
-            self.toggle_batch_rbf,
-            _('Batch unconfirmed transactions'),
-            _('If you check this box, your unconfirmed transactions will be consolidated into a single transaction.') + '\n' + \
-            _('This will save fees, but might have unwanted effects in terms of privacy'))
-        add_pref_action(
-            self.config.get('confirmed_only', False),
-            self.toggle_confirmed_only,
-            _('Spend only confirmed coins'),
-            _('Spend only confirmed inputs.'))
-        add_pref_action(
-            self.config.get('coin_chooser_output_rounding', True),
-            self.toggle_output_rounding,
-            _('Enable output value rounding'),
-            _('Set the value of the change output so that it has similar precision to the other outputs.') + '\n' + \
-            _('This might improve your privacy somewhat.') + '\n' + \
-            _('If enabled, at most 100 satoshis might be lost due to this, per transaction.'))
+        add_cv_action(self.config.cv.WALLET_BATCH_RBF, self.toggle_batch_rbf)
+        add_cv_action(self.config.cv.WALLET_MERGE_DUPLICATE_OUTPUTS, self.toggle_merge_duplicate_outputs)
+        add_cv_action(self.config.cv.WALLET_SPEND_CONFIRMED_ONLY, self.toggle_confirmed_only)
+        add_cv_action(self.config.cv.WALLET_COIN_CHOOSER_OUTPUT_ROUNDING, self.toggle_output_rounding)
         self.pref_button = QToolButton()
         self.pref_button.setIcon(read_QIcon("preferences.png"))
         self.pref_button.setMenu(self.pref_menu)
@@ -445,8 +432,8 @@ class TxEditor(WindowModalDialog):
         self.resize(size)
 
     def toggle_output_rounding(self):
-        b = not self.config.get('coin_chooser_output_rounding', True)
-        self.config.set_key('coin_chooser_output_rounding', b)
+        b = not self.config.WALLET_COIN_CHOOSER_OUTPUT_ROUNDING
+        self.config.WALLET_COIN_CHOOSER_OUTPUT_ROUNDING = b
         self.trigger_update()
 
     def toggle_use_change(self):
@@ -461,30 +448,40 @@ class TxEditor(WindowModalDialog):
         self.trigger_update()
 
     def toggle_batch_rbf(self):
-        b = not self.config.get('batch_rbf', False)
-        self.config.set_key('batch_rbf', b)
+        b = not self.config.WALLET_BATCH_RBF
+        self.config.WALLET_BATCH_RBF = b
+        self.trigger_update()
+
+    def toggle_merge_duplicate_outputs(self):
+        b = not self.config.WALLET_MERGE_DUPLICATE_OUTPUTS
+        self.config.WALLET_MERGE_DUPLICATE_OUTPUTS = b
+        self.trigger_update()
+
+    def toggle_send_change_to_lightning(self):
+        b = not self.config.WALLET_SEND_CHANGE_TO_LIGHTNING
+        self.config.WALLET_SEND_CHANGE_TO_LIGHTNING = b
         self.trigger_update()
 
     def toggle_confirmed_only(self):
-        b = not self.config.get('confirmed_only', False)
-        self.config.set_key('confirmed_only', b)
+        b = not self.config.WALLET_SPEND_CONFIRMED_ONLY
+        self.config.WALLET_SPEND_CONFIRMED_ONLY = b
         self.trigger_update()
 
     def toggle_io_visibility(self):
-        b = not self.config.get('show_tx_io', False)
-        self.config.set_key('show_tx_io', b)
+        b = not self.config.GUI_QT_TX_EDITOR_SHOW_IO
+        self.config.GUI_QT_TX_EDITOR_SHOW_IO = b
         self.set_io_visible(b)
         self.resize_to_fit_content()
 
     def toggle_fee_details(self):
-        b = not self.config.get('show_tx_fee_details', False)
-        self.config.set_key('show_tx_fee_details', b)
+        b = not self.config.GUI_QT_TX_EDITOR_SHOW_FEE_DETAILS
+        self.config.GUI_QT_TX_EDITOR_SHOW_FEE_DETAILS = b
         self.set_fee_edit_visible(b)
         self.resize_to_fit_content()
 
     def toggle_locktime(self):
-        b = not self.config.get('show_tx_locktime', False)
-        self.config.set_key('show_tx_locktime', b)
+        b = not self.config.GUI_QT_TX_EDITOR_SHOW_LOCKTIME
+        self.config.GUI_QT_TX_EDITOR_SHOW_LOCKTIME = b
         self.set_locktime_visible(b)
         self.resize_to_fit_content()
 
@@ -524,7 +521,7 @@ class TxEditor(WindowModalDialog):
         self._update_amount_label()
         if self.not_enough_funds:
             self.error = _('Not enough funds.')
-            confirmed_only = self.config.get('confirmed_only', False)
+            confirmed_only = self.config.WALLET_SPEND_CONFIRMED_ONLY
             if confirmed_only and self.can_pay_assuming_zero_fees(confirmed_only=False):
                 self.error += ' ' + _('Change your settings to allow spending unconfirmed coins.')
             elif self.can_pay_assuming_zero_fees(confirmed_only=confirmed_only):
@@ -563,6 +560,8 @@ class TxEditor(WindowModalDialog):
                 self.error = long_warning
             else:
                 messages.append(long_warning)
+        if self.tx.has_dummy_output(DummyAddress.SWAP):
+            messages.append(_('This transaction will send funds to a submarine swap.'))
         # warn if spending unconf
         if any((txin.block_height is not None and txin.block_height<=0) for txin in self.tx.inputs()):
             messages.append(_('This transaction will spend unconfirmed coins.'))
@@ -571,8 +570,14 @@ class TxEditor(WindowModalDialog):
             messages.append(_('This payment will be merged with another existing transaction.'))
         # warn if we use multiple change outputs
         num_change = sum(int(o.is_change) for o in self.tx.outputs())
+        num_ismine = sum(int(o.is_mine) for o in self.tx.outputs())
         if num_change > 1:
             messages.append(_('This transaction has {} change outputs.'.format(num_change)))
+        # warn if there is no ismine output, as it might be problematic to RBF the tx later.
+        # (though RBF is still possible by adding new inputs, if the wallet has more utxos)
+        if num_ismine == 0:
+            messages.append(_('Make sure you pay enough mining fees; you will not be able to bump the fee later.'))
+
         # TODO: warn if we send change back to input address
         return messages
 
@@ -631,7 +636,7 @@ class ConfirmTxDialog(TxEditor):
 
     def update_tx(self, *, fallback_to_zero_fee: bool = False):
         fee_estimator = self.get_fee_estimator()
-        confirmed_only = self.config.get('confirmed_only', False)
+        confirmed_only = self.config.WALLET_SPEND_CONFIRMED_ONLY
         try:
             self.tx = self.make_tx(fee_estimator, confirmed_only=confirmed_only)
             self.not_enough_funds = False

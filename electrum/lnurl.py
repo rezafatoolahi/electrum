@@ -11,8 +11,9 @@ import urllib.parse
 import aiohttp.client_exceptions
 from aiohttp import ClientResponse
 
-from electrum.segwit_addr import bech32_decode, Encoding, convertbits
-from electrum.lnaddr import LnDecodeException
+from electrum import segwit_addr
+from electrum.segwit_addr import bech32_decode, Encoding, convertbits, bech32_encode
+from electrum.lnaddr import LnDecodeException, LnEncodeException
 from electrum.network import Network
 from electrum.logging import get_logger
 
@@ -45,6 +46,19 @@ def decode_lnurl(lnurl: str) -> str:
     return url
 
 
+def encode_lnurl(url: str) -> str:
+    """Encode url to bech32 lnurl string."""
+    try:
+        url = url.encode("utf-8")
+    except UnicodeError as e:
+        raise LnEncodeException("invalid url") from e
+    bech32_data = convertbits(url, 8, 5, True)
+    assert bech32_data
+    lnurl = bech32_encode(
+        encoding=segwit_addr.Encoding.BECH32, hrp="lnurl", data=bech32_data)
+    return lnurl.upper()
+
+
 def _is_url_safe_enough_for_lnurl(url: str) -> bool:
     u = urllib.parse.urlparse(url)
     if u.scheme.lower() == "https":
@@ -70,13 +84,13 @@ async def _request_lnurl(url: str) -> dict:
     try:
         response_raw = await Network.async_send_http_on_proxy("get", url, timeout=10)
     except asyncio.TimeoutError as e:
-        raise LNURLError("Server did not reply in time.") from e
+        raise LNURLError("LNURL server did not reply in time.") from e
     except aiohttp.client_exceptions.ClientError as e:
         raise LNURLError(f"Client error: {e}") from e
     try:
         response = json.loads(response_raw)
     except json.JSONDecodeError:
-        raise LNURLError(f"Invalid response from server")
+        raise LNURLError(f"Invalid response from LNURL server")
 
     status = response.get("status")
     if status and status == "ERROR":
@@ -134,13 +148,13 @@ async def callback_lnurl(url: str, params: dict) -> dict:
     try:
         response_raw = await Network.async_send_http_on_proxy("get", url, params=params)
     except asyncio.TimeoutError as e:
-        raise LNURLError("Server did not reply in time.") from e
+        raise LNURLError("LNURL server did not reply in time.") from e
     except aiohttp.client_exceptions.ClientError as e:
         raise LNURLError(f"Client error: {e}") from e
     try:
         response = json.loads(response_raw)
     except json.JSONDecodeError:
-        raise LNURLError(f"Invalid response from server")
+        raise LNURLError(f"Invalid response from LNURL server")
 
     status = response.get("status")
     if status and status == "ERROR":

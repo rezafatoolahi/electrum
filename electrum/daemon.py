@@ -24,6 +24,7 @@
 # SOFTWARE.
 import asyncio
 import ast
+import errno
 import os
 import time
 import traceback
@@ -34,6 +35,7 @@ from base64 import b64decode, b64encode
 from collections import defaultdict
 import json
 import socket
+from enum import IntEnum
 
 import aiohttp
 from aiohttp import web, client_exceptions
@@ -41,13 +43,13 @@ from aiorpcx import timeout_after, TaskTimeout, ignore_after
 
 from . import util
 from .network import Network
-from .util import (json_decode, to_bytes, to_string, profiler, standardize_path, constant_time_compare)
+from .util import (json_decode, to_bytes, to_string, profiler, standardize_path, constant_time_compare, InvalidPassword)
 from .invoices import PR_PAID, PR_EXPIRED
-from .util import log_exceptions, ignore_exceptions, randrange, OldTaskGroup
-from .util import EventListener, event_listener
+from .util import log_exceptions, ignore_exceptions, randrange, OldTaskGroup, UserFacingException, JsonRPCError
+from .util import EventListener, event_listener, traceback_format_exception
 from .wallet import Wallet, Abstract_Wallet
 from .storage import WalletStorage
-from .wallet_db import WalletDB
+from .wallet_db import WalletDB, WalletRequiresSplit, WalletRequiresUpgrade, WalletUnfinished
 from .commands import known_commands, Commands
 from .simple_config import SimpleConfig
 from .exchange_rate import FxThread
@@ -69,7 +71,7 @@ def get_rpcsock_defaultpath(config: SimpleConfig):
     return os.path.join(config.path, 'daemon_rpc_socket')
 
 def get_rpcsock_default_type(config: SimpleConfig):
-    if config.get('rpcport'):
+    if config.RPC_PORT:
         return 'tcp'
     # Use unix domain sockets when available,
     # with the extra paranoia that in case windows "implements" them,
@@ -106,7 +108,7 @@ def get_file_descriptor(config: SimpleConfig):
 
 
 
-def request(config: SimpleConfig, endpoint, args=(), timeout=60):
+def request(config: SimpleConfig, endpoint, args=(), timeout: Union[float, int] = 60):
     lockfile = get_lockfile(config)
     while True:
         create_time = None
@@ -151,13 +153,22 @@ def request(config: SimpleConfig, endpoint, args=(), timeout=60):
         time.sleep(1.0)
 
 
+def wait_until_daemon_becomes_ready(*, config: SimpleConfig, timeout=5) -> bool:
+    t0 = time.monotonic()
+    while True:
+        if time.monotonic() > t0 + timeout:
+            return False  # timeout
+        try:
+            request(config, 'ping')
+            return True  # success
+        except DaemonNotRunning:
+            time.sleep(0.05)
+            continue
+
+
 def get_rpc_credentials(config: SimpleConfig) -> Tuple[str, str]:
-    rpc_user = config.get('rpcuser', None)
-    rpc_password = config.get('rpcpassword', None)
-    if rpc_user == '':
-        rpc_user = None
-    if rpc_password == '':
-        rpc_password = None
+    rpc_user = config.RPC_USERNAME or None
+    rpc_password = config.RPC_PASSWORD or None
     if rpc_user is None or rpc_password is None:
         rpc_user = 'user'
         bits = 128
@@ -166,8 +177,8 @@ def get_rpc_credentials(config: SimpleConfig) -> Tuple[str, str]:
         pw_b64 = b64encode(
             pw_int.to_bytes(nbytes, 'big'), b'-_')
         rpc_password = to_string(pw_b64, 'ascii')
-        config.set_key('rpcuser', rpc_user)
-        config.set_key('rpcpassword', rpc_password, save=True)
+        config.RPC_USERNAME = rpc_user
+        config.RPC_PASSWORD = rpc_password
     return rpc_user, rpc_password
 
 
@@ -241,28 +252,37 @@ class AuthenticatedServer(Logger):
                 response['result'] = await f(**params)
             else:
                 response['result'] = await f(*params)
+        except UserFacingException as e:
+            response['error'] = {
+                'code': JsonRPCError.Codes.USERFACING,
+                'message': str(e),
+            }
         except BaseException as e:
             self.logger.exception("internal error while executing RPC")
             response['error'] = {
-                'code': 1,
-                'message': str(e),
+                'code': JsonRPCError.Codes.INTERNAL,
+                'message': "internal error while executing RPC",
+                'data': {
+                    "exception": repr(e),
+                    "traceback": "".join(traceback_format_exception(e)),
+                },
             }
         return web.json_response(response)
 
 
 class CommandsServer(AuthenticatedServer):
 
-    def __init__(self, daemon, fd):
+    def __init__(self, daemon: 'Daemon', fd):
         rpc_user, rpc_password = get_rpc_credentials(daemon.config)
         AuthenticatedServer.__init__(self, rpc_user, rpc_password)
         self.daemon = daemon
         self.fd = fd
         self.config = daemon.config
-        sockettype = self.config.get('rpcsock', 'auto')
+        sockettype = self.config.RPC_SOCKET_TYPE
         self.socktype = sockettype if sockettype != 'auto' else get_rpcsock_default_type(self.config)
-        self.sockpath = self.config.get('rpcsockpath', get_rpcsock_defaultpath(self.config))
-        self.host = self.config.get('rpchost', '127.0.0.1')
-        self.port = self.config.get('rpcport', 0)
+        self.sockpath = self.config.RPC_SOCKET_FILEPATH or get_rpcsock_defaultpath(self.config)
+        self.host = self.config.RPC_HOST
+        self.port = self.config.RPC_PORT
         self.app = web.Application()
         self.app.router.add_post("/", self.handle)
         self.register_method(self.ping)
@@ -315,12 +335,11 @@ class CommandsServer(AuthenticatedServer):
             if hasattr(self.daemon.gui_object, 'new_window'):
                 path = config_options.get('wallet_path') or self.config.get_wallet_path(use_gui_last_wallet=True)
                 self.daemon.gui_object.new_window(path, config_options.get('url'))
-                response = "ok"
+                return True
             else:
-                response = "error: current GUI does not support multiple windows"
+                raise UserFacingException("error: current GUI does not support multiple windows")
         else:
-            response = "Error: Electrum is running in daemon mode. Please stop the daemon first."
-        return response
+            raise UserFacingException("error: Electrum is running in daemon mode. Please stop the daemon first.")
 
     async def run_cmdline(self, config_options):
         cmdname = config_options['cmd']
@@ -338,22 +357,19 @@ class CommandsServer(AuthenticatedServer):
         elif 'wallet' in cmd.options:
             kwargs['wallet'] = config_options.get('wallet_path')
         func = getattr(self.cmd_runner, cmd.name)
-        # fixme: not sure how to retrieve message in jsonrpcclient
-        try:
-            result = await func(*args, **kwargs)
-        except Exception as e:
-            result = {'error':str(e)}
+        # execute requested command now.  note: cmd can raise, the caller (self.handle) will wrap it.
+        result = await func(*args, **kwargs)
         return result
 
 
 class WatchTowerServer(AuthenticatedServer):
 
-    def __init__(self, network, netaddress):
-        self.addr = netaddress
+    def __init__(self, network: 'Network', port:int):
+        self.port = port
         self.config = network.config
         self.network = network
-        watchtower_user = self.config.get('watchtower_user', '')
-        watchtower_password = self.config.get('watchtower_password', '')
+        watchtower_user = self.config.WATCHTOWER_SERVER_USER or ""
+        watchtower_password = self.config.WATCHTOWER_SERVER_PASSWORD or ""
         AuthenticatedServer.__init__(self, watchtower_user, watchtower_password)
         self.lnwatcher = network.local_watchtower
         self.app = web.Application()
@@ -364,9 +380,9 @@ class WatchTowerServer(AuthenticatedServer):
     async def run(self):
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
-        site = web.TCPSite(self.runner, host=str(self.addr.host), port=self.addr.port, ssl_context=self.config.get_ssl_context())
+        site = web.TCPSite(self.runner, host='localhost', port=self.port)
         await site.start()
-        self.logger.info(f"now running and listening. addr={self.addr}")
+        self.logger.info(f"running and listening on port {self.port}")
 
     async def get_ctn(self, *args):
         return await self.lnwatcher.get_ctn(*args)
@@ -402,36 +418,34 @@ class Daemon(Logger):
         if 'wallet_path' in config.cmdline_options:
             self.logger.warning("Ignoring parameter 'wallet_path' for daemon. "
                                 "Use the load_wallet command instead.")
+        self._plugins = None  # type: Optional[Plugins]
         self.asyncio_loop = util.get_asyncio_loop()
-        if not config.get('offline'):
+        if not self.config.NETWORK_OFFLINE:
             self.network = Network(config, daemon=self)
         self.fx = FxThread(config=config)
-        # path -> wallet;   make sure path is standardized.
+        # wallet_key -> wallet
         self._wallets = {}  # type: Dict[str, Abstract_Wallet]
         self._wallet_lock = threading.RLock()
-        daemon_jobs = []
-        # Setup commands server
-        self.commands_server = None
-        if listen_jsonrpc:
-            self.commands_server = CommandsServer(self, fd)
-            daemon_jobs.append(self.commands_server.run())
 
         self._stop_entered = False
         self._stopping_soon_or_errored = threading.Event()
         self._stopped_event = threading.Event()
+
         self.taskgroup = OldTaskGroup()
-        asyncio.run_coroutine_threadsafe(self._run(jobs=daemon_jobs), self.asyncio_loop)
+        asyncio.run_coroutine_threadsafe(self._run(), self.asyncio_loop)
         if start_network and self.network:
             self.start_network()
+        # Setup commands server
+        self.commands_server = None
+        if listen_jsonrpc:
+            self.commands_server = CommandsServer(self, fd)
+            asyncio.run_coroutine_threadsafe(self.taskgroup.spawn(self.commands_server.run()), self.asyncio_loop)
 
     @log_exceptions
-    async def _run(self, jobs: Iterable = None):
-        if jobs is None:
-            jobs = []
+    async def _run(self):
         self.logger.info("starting taskgroup.")
         try:
             async with self.taskgroup as group:
-                [await group.spawn(job) for job in jobs]
                 await group.spawn(asyncio.Event().wait)  # run forever (until cancel)
         except Exception as e:
             self.logger.exception("taskgroup died.")
@@ -444,17 +458,28 @@ class Daemon(Logger):
 
     def start_network(self):
         self.logger.info(f"starting network.")
-        assert not self.config.get('offline')
+        assert not self.config.NETWORK_OFFLINE
         assert self.network
         # server-side watchtower
-        if watchtower_address := self.config.get_netaddress('watchtower_address'):
-            self.watchtower = WatchTowerServer(self.network, watchtower_address)
+        if watchtower_port := self.config.WATCHTOWER_SERVER_PORT:
+            self.watchtower = WatchTowerServer(self.network, watchtower_port)
             asyncio.run_coroutine_threadsafe(self.taskgroup.spawn(self.watchtower.run), self.asyncio_loop)
 
         self.network.start(jobs=[self.fx.run])
         # prepare lightning functionality, also load channel db early
-        if self.config.get('use_gossip', False):
+        if self.config.LIGHTNING_USE_GOSSIP:
             self.network.start_gossip()
+
+    @staticmethod
+    def _wallet_key_from_path(path) -> str:
+        """This does stricter path standardization than 'standardize_path'.
+        It is used for keying the _wallets dict, but not for the actual filesystem operations. (see #8495)
+        """
+        path = standardize_path(path)
+        # also resolve symlinks and windows network mounts/etc:
+        path = os.path.realpath(path)
+        path = os.path.normcase(path)
+        return str(path)
 
     def with_wallet_lock(func):
         def func_wrapper(self: 'Daemon', *args, **kwargs):
@@ -463,15 +488,13 @@ class Daemon(Logger):
         return func_wrapper
 
     @with_wallet_lock
-    def load_wallet(self, path, password, *, manual_upgrades=True) -> Optional[Abstract_Wallet]:
+    def load_wallet(self, path, password, *, upgrade=False) -> Optional[Abstract_Wallet]:
         path = standardize_path(path)
+        wallet_key = self._wallet_key_from_path(path)
         # wizard will be launched if we return
-        if path in self._wallets:
-            wallet = self._wallets[path]
+        if wallet := self._wallets.get(wallet_key):
             return wallet
-        wallet = self._load_wallet(path, password, manual_upgrades=manual_upgrades, config=self.config)
-        if wallet is None:
-            return
+        wallet = self._load_wallet(path, password, upgrade=upgrade, config=self.config)
         wallet.start_network(self.network)
         self.add_wallet(wallet)
         return wallet
@@ -482,38 +505,34 @@ class Daemon(Logger):
             path,
             password,
             *,
-            manual_upgrades: bool = True,
+            upgrade: bool = False,
             config: SimpleConfig,
     ) -> Optional[Abstract_Wallet]:
         path = standardize_path(path)
         storage = WalletStorage(path)
         if not storage.file_exists():
-            return
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
         if storage.is_encrypted():
             if not password:
-                return
+                raise InvalidPassword('No password given')
             storage.decrypt(password)
         # read data, pass it to db
-        db = WalletDB(storage.read(), manual_upgrades=manual_upgrades)
-        if db.requires_split():
-            return
-        if db.requires_upgrade():
-            return
+        db = WalletDB(storage.read(), storage=storage, upgrade=upgrade)
         if db.get_action():
-            return
-        wallet = Wallet(db, storage, config=config)
+            raise WalletUnfinished(db)
+        wallet = Wallet(db, config=config)
         return wallet
 
     @with_wallet_lock
     def add_wallet(self, wallet: Abstract_Wallet) -> None:
         path = wallet.storage.path
-        path = standardize_path(path)
-        self._wallets[path] = wallet
+        wallet_key = self._wallet_key_from_path(path)
+        self._wallets[wallet_key] = wallet
         run_hook('daemon_wallet_loaded', self, wallet)
 
     def get_wallet(self, path: str) -> Optional[Abstract_Wallet]:
-        path = standardize_path(path)
-        return self._wallets.get(path)
+        wallet_key = self._wallet_key_from_path(path)
+        return self._wallets.get(wallet_key)
 
     @with_wallet_lock
     def get_wallets(self) -> Dict[str, Abstract_Wallet]:
@@ -535,14 +554,17 @@ class Daemon(Logger):
     @with_wallet_lock
     async def _stop_wallet(self, path: str) -> bool:
         """Returns True iff a wallet was found."""
-        path = standardize_path(path)
-        wallet = self._wallets.pop(path, None)
+        wallet_key = self._wallet_key_from_path(path)
+        wallet = self._wallets.pop(wallet_key, None)
         if not wallet:
             return False
         await wallet.stop()
         return True
 
     def run_daemon(self):
+        # init plugins
+        self._plugins = Plugins(self.config, 'cmdline')
+        # block until we are stopping
         try:
             self._stopping_soon_or_errored.wait()
         except KeyboardInterrupt:
@@ -573,6 +595,11 @@ class Daemon(Logger):
                     if self.network:
                         await group.spawn(self.network.stop(full_shutdown=True))
                     await group.spawn(self.taskgroup.cancel_remaining())
+            if self._plugins:
+                self.logger.info("stopping plugins")
+                self._plugins.stop()
+                async with ignore_after(1):
+                    await self._plugins.stopped_event_async.wait()
         finally:
             if self.listen_jsonrpc:
                 self.logger.info("removing lockfile")
@@ -580,18 +607,20 @@ class Daemon(Logger):
             self.logger.info("stopped")
             self._stopped_event.set()
 
-    def run_gui(self, config: 'SimpleConfig', plugins: 'Plugins'):
+    def run_gui(self) -> None:
+        assert self.config
         threading.current_thread().name = 'GUI'
-        gui_name = config.get('gui', 'qt')
+        gui_name = self.config.GUI_NAME
         if gui_name in ['lite', 'classic']:
             gui_name = 'qt'
+        self._plugins = Plugins(self.config, gui_name)  # init plugins
         self.logger.info(f'launching GUI: {gui_name}')
         try:
             try:
                 gui = __import__('electrum.gui.' + gui_name, fromlist=['electrum'])
             except GuiImportError as e:
                 sys.exit(str(e))
-            self.gui_object = gui.ElectrumGui(config=config, daemon=self, plugins=plugins)
+            self.gui_object = gui.ElectrumGui(config=self.config, daemon=self, plugins=self._plugins)
             if not self._stop_entered:
                 self.gui_object.main()
             else:
@@ -625,12 +654,11 @@ class Daemon(Logger):
             #                  hard-to-understand bugs will follow...
             if wallet is None:
                 try:
-                    wallet = self._load_wallet(path, old_password, manual_upgrades=False, config=self.config)
+                    wallet = self._load_wallet(path, old_password, upgrade=True, config=self.config)
                 except util.InvalidPassword:
                     pass
                 except Exception:
                     self.logger.exception(f'failed to load wallet at {path!r}:')
-                    pass
             if wallet is None:
                 failed.append(path)
                 continue
